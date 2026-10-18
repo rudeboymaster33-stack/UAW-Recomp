@@ -30,10 +30,12 @@ if "%PYEXE%"=="" (echo ==== PYTHON MISSING & goto :fail)
 echo PYEXE=%PYEXE%
 echo ==== SDK PATCH
 cd /d "%SDKSRC%"
-git apply --reverse --check "%ROOT%patches\0002-android-port.patch" 2>nul
-if errorlevel 1 (
-  git apply "%ROOT%patches\0002-android-port.patch"
-  if errorlevel 1 goto :fail
+for %%P in (0002-android-port 0003-vulkan-storage-rewind) do (
+  git apply --reverse --check "%ROOT%patches\%%P.patch" 2>nul
+  if errorlevel 1 (
+    git apply "%ROOT%patches\%%P.patch"
+    if errorlevel 1 goto :fail
+  )
 )
 
 echo ==== SDK CONFIGURE
