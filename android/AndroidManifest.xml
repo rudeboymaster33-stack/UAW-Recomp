@@ -13,6 +13,10 @@
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
 
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- The game's skirmish/multiplayer lobby runs over (loopback) sockets even offline;
+         without this permission Android refuses to create sockets. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application
         android:label="Universe at War"

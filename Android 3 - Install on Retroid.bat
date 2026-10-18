@@ -40,11 +40,12 @@ if errorlevel 1 (
 )
 "%ADB%" pull %PKGDIR%/uaw.log "%ROOT%logs\android_uaw_firstrun.log" >> "%LOG%" 2>&1
 "%ADB%" shell rm -f %PKGDIR%/uaw.log >> "%LOG%" 2>&1
+"%ADB%" shell rm -f %PKGDIR%/args.txt %PKGDIR%/profile_on >> "%LOG%" 2>&1
 "%ADB%" logcat -c >> "%LOG%" 2>&1
 echo Starting the game on the phone...
 "%ADB%" shell am start -n com.uaw.recomp/.UawActivity >> "%LOG%" 2>&1
 echo ==== DONE >> "%LOG%"
 echo.
 echo The game should now be opening on your phone.
-echo When you're done (or if it closes/crashes), run 23_get_phone_logs so Claude can read what happened.
+echo When you're done (or if it closes/crashes), run "Android 4 - Get Retroid logs" so Claude can read what happened.
 pause

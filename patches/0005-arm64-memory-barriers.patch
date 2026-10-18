@@ -1,0 +1,59 @@
+diff --git a/resources/templates/codegen/pch_h.inja b/resources/templates/codegen/pch_h.inja
+index 68274d2..f5cb7de 100644
+--- a/resources/templates/codegen/pch_h.inja
++++ b/resources/templates/codegen/pch_h.inja
+@@ -306,6 +306,23 @@ inline void ppc_trap(PPCContext& ctx, u8* base, u16 trap_type) {
+   }
+ }
+ 
++//=============================================================================
++// Memory Barriers
++// x86 is strongly ordered, so PPC sync/lwsync/eieio need no instruction there
++// (unchanged x86 output). ARM64 is weakly ordered like PPC: emit real fences
++// so lock-free guest code (flags published after data) stays correct.
++//=============================================================================
++
++#if defined(__aarch64__) || defined(_M_ARM64)
++#define REX_PPC_SYNC() __atomic_thread_fence(__ATOMIC_SEQ_CST)
++#define REX_PPC_LWSYNC() __atomic_thread_fence(__ATOMIC_ACQ_REL)
++#define REX_PPC_EIEIO() __atomic_thread_fence(__ATOMIC_SEQ_CST)
++#else
++#define REX_PPC_SYNC() ((void)0)
++#define REX_PPC_LWSYNC() ((void)0)
++#define REX_PPC_EIEIO() ((void)0)
++#endif
++
+ //=============================================================================
+ // Interrupt Locks
+ //=============================================================================
+diff --git a/src/codegen/builders/system.cpp b/src/codegen/builders/system.cpp
+index b2d70f5..a2d8a04 100644
+--- a/src/codegen/builders/system.cpp
++++ b/src/codegen/builders/system.cpp
+@@ -31,20 +31,20 @@ bool build_attn(BuilderContext& ctx) {
+ }
+ 
+ bool build_sync(BuilderContext& ctx) {
+-  // Memory barrier, x86 has strong ordering so this is a no-op
+-  (void)ctx;
++  // No-op on x86 (strong ordering); a real fence on ARM64. See REX_PPC_* in the pch.
++  ctx.println("\tREX_PPC_SYNC();");
+   return true;
+ }
+ 
+ bool build_lwsync(BuilderContext& ctx) {
+-  // Lightweight memory barrier, x86 has strong ordering so this is a no-op
+-  (void)ctx;
++  // No-op on x86 (strong ordering); a real fence on ARM64. See REX_PPC_* in the pch.
++  ctx.println("\tREX_PPC_LWSYNC();");
+   return true;
+ }
+ 
+ bool build_eieio(BuilderContext& ctx) {
+-  // Enforce in-order execution of I/O, x86 has strong ordering so this is a no-op
+-  (void)ctx;
++  // No-op on x86 (strong ordering); a real fence on ARM64. See REX_PPC_* in the pch.
++  ctx.println("\tREX_PPC_EIEIO();");
+   return true;
+ }
+ 

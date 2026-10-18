@@ -141,3 +141,9 @@ name = "UawHook_Swap"
 address = 0x8225CF14
 name = "UawHook_FrameSyncInit"
 registers = ["r31"]
+
+# Diagnostics: count zlib inflate() calls (asset streaming load)
+[[entrypoint.midasm_hook]]
+address = 0x82A09CE0
+name = "UawHook_Inflate"
+registers = ["r3"]

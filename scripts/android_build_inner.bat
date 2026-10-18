@@ -30,13 +30,8 @@ if "%PYEXE%"=="" (echo ==== PYTHON MISSING & goto :fail)
 echo PYEXE=%PYEXE%
 echo ==== SDK PATCH
 cd /d "%SDKSRC%"
-for %%P in (0002-android-port 0003-vulkan-storage-rewind) do (
-  git apply --reverse --check "%ROOT%patches\%%P.patch" 2>nul
-  if errorlevel 1 (
-    git apply "%ROOT%patches\%%P.patch"
-    if errorlevel 1 goto :fail
-  )
-)
+call "%ROOT%scripts\apply_sdk_patches.bat"
+if errorlevel 1 goto :fail
 
 echo ==== SDK CONFIGURE
 cmake -S "%SDKSRC%" -B "%SDKBUILD%" -G Ninja %TC% "-DCMAKE_C_FLAGS=%ARCHFLAGS%" "-DCMAKE_CXX_FLAGS=%ARCHFLAGS%" "-DCMAKE_INSTALL_PREFIX=%SDKINST%" -DREXGLUE_USE_VULKAN=ON -DREXGLUE_USE_D3D12=OFF -DREXGLUE_ENABLE_TRACY=OFF "-DPYTHON_EXECUTABLE=%PYEXE%" "-DPython3_EXECUTABLE=%PYEXE%"
@@ -51,6 +46,9 @@ echo ==== GAME CONFIGURE
 if not exist "%PROJ%\assets" mkdir "%PROJ%\assets"
 if not exist "%PROJ%\assets\default.xex" copy /y "%ROOT%files\default.xex" "%PROJ%\assets\default.xex"
 copy /y "%ROOT%files\uaw_manifest.toml" "%PROJ%\uaw_manifest.toml"
+cd /d "%PROJ%"
+"%HOSTREX%" codegen uaw_manifest.toml
+if errorlevel 1 goto :fail
 cmake -S "%PROJ%" -B "%GBUILD%" -G Ninja %TC% "-DCMAKE_C_FLAGS=%ARCHFLAGS%" "-DCMAKE_CXX_FLAGS=%ARCHFLAGS%" "-DCMAKE_PREFIX_PATH=%SDKINST%" -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH "-Drexglue_DIR=%SDKINST%\lib\cmake\rexglue" "-DUAW_HOST_REXGLUE=%HOSTREX%"
 if errorlevel 1 goto :fail
 echo ==== GAME BUILD

@@ -7,10 +7,11 @@ built with the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk). Requires y
 generated from the executable are excluded by `.gitignore` and must come from your own disc.
 
 ## Status (2026-10-18)
-- Boots, plays the intro, menus at 60 FPS; campaign and skirmish missions play (D3D12 GPU emulation, Intel Arc 130V).
-- Battles run near the game's own 30 FPS cap with the RTV render path (ROV was 10-15 FPS); dips to ~20 in big fights.
-- Fixed: blinking shadows (occlusion queries off), achievement-progress error (SDK patch), achievements metadata.
-- Known: some model pop-in (possibly original behaviour); small grey blocks over the menu background video.
+- **PC:** boots, menus 60 FPS, campaign and skirmish play near the game's own 30 FPS battle cap (D3D12, RTV path).
+- **Android (Retroid Pocket 6, Snapdragon 8 Gen 2):** plays with the built-in controls, Vulkan on Adreno 740,
+  menus 60 FPS, battles ~29-30 FPS. Shader storage persists between runs (no repeat stutter).
+- Fixed: blinking shadows (occlusion queries off), achievement-progress error (SDK patch), Android shader-storage reload.
+- Known: short game-side stretches at ~23-24 FPS in skirmishes on both PC and Android; some model pop-in.
 
 ## Folder layout
 | Path | What |
@@ -28,17 +29,17 @@ generated from the executable are excluded by `.gitignore` and must come from yo
 ## Launchers (double-click)
 | Script | Purpose |
 |---|---|
-| `01_install_tools.bat` | Install Git, CMake, Ninja, LLVM/Clang, VS 2022 Build Tools (winget) |
-| `02_build_sdk.bat` | Clone + build + install the SDK |
-| `03_recompile_and_build_game.bat` | Copy manifest, run codegen, build `uaw.exe` |
-| `04_run_game.bat` | Run the game |
-| `05_rebuild_and_run.bat` | 03 + 04 in one go (main dev loop) |
-| `06_debug_run.bat` | RelWithDebInfo build + crash symbolization (blocked by Smart App Control on this PC) |
-| `09_speed_compare.bat` | Timed FPS comparison of ROV vs RTV render paths |
-| `10a_play_ROV.bat` / `10b_play_RTV.bat` | Play normally with FPS logged every second |
-| `11_git_commit.bat` | Commit current state to this git repo |
-| `12_test_novsync_noocclusion.bat` / `13_test_readback.bat` | Graphics experiments (kept for reference) |
-| `15_rebuild_sdk_and_game.bat` | Rebuild the (patched) SDK, then rebuild + run the game |
+| `PC 1 - Install build tools.bat` | Install Git, CMake, Ninja, LLVM/Clang, VS 2022 Build Tools (winget) — once |
+| `PC 2 - Build SDK.bat` | Build + install the SDK for Windows — once, or after SDK patches |
+| `PC 3 - Build game.bat` | Copy manifest, run codegen, build `uaw.exe` |
+| `PC 4 - Play.bat` | Play the PC version |
+| `Android 1 - Install build tools.bat` | Java 17, Android SDK + NDK into `android-tools/` — once |
+| `Android 2 - Build app.bat` | Build SDK + game for arm64 and package `UniverseAtWar.apk` |
+| `Android 3 - Install on Retroid.bat` | Install over USB (USB debugging on), copy game files the first time, start it |
+| `Android 4 - Get Retroid logs.bat` | Copy the game log + Android log from the device into `logs/` |
+| `Save progress (git).bat` | Commit the current state to this git repo |
+
+Developer/test scripts (FPS comparisons, debug builds, experiments) live in `scripts/dev/`.
 
 Game data path used by the scripts:
 `C:\ROMS\Xbox 360\Universe at War - Earth Assault (USA)\Universe at War - Earth Assault (USA)`
@@ -73,7 +74,11 @@ After any manifest change, codegen must report **0** "Unresolved …" / "Jump ta
 - Mid-asm hooks (`[[entrypoint.midasm_hook]]`) + `REXLOG_WARN` in `src/uaw_hooks.cpp`.
 - Render path: `--render_target_path_d3d12=rov|rtv` (SDK defaults to ROV on Intel).
 
+## Android notes
+- SDK patches `patches/0002-android-port.patch` (platform port) and `0003-vulkan-storage-rewind.patch`
+  are applied automatically by `Android 2 - Build app.bat`.
+- On the device everything lives in `Android/data/com.uaw.recomp/files/`: `game/` (Data + default.xex),
+  `userdata/` (saves, shader cache), `uaw.log`, optional `args.txt` (extra flags, one per line).
+
 ## Next steps
-1. Investigate remaining battle dips and model pop-in.
-2. Fix menu-video grey blocks (likely a CPU-side video decode issue, not GPU).
-3. Android: arm64 NDK build, Vulkan backend, touch controls.
+1. Investigate the game-side ~23-24 FPS stretches in skirmishes.

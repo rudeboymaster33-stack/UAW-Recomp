@@ -17,6 +17,8 @@ git clone --recursive --depth 1 --shallow-submodules https://github.com/rexglue/
 if errorlevel 1 goto :fail
 :configure
 cd /d "%ROOT%rexglue-sdk"
+call "%ROOT%scripts\apply_sdk_patches.bat"
+if errorlevel 1 goto :fail
 cmake --preset win-amd64 -DREXGLUE_ENABLE_TRACY=OFF
 if errorlevel 1 goto :fail
 cmake --build out/build/win-amd64 --config Release --target install -j 6
