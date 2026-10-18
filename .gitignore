@@ -21,3 +21,5 @@ files/hooks*/
 *.dll
 scripts/commit_msg.txt
 userdata/
+android-tools/
+*.apk
