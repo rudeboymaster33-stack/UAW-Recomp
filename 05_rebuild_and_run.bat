@@ -6,6 +6,7 @@ if errorlevel 1 (echo BUILD FAILED - Claude will read the log. & pause & exit /b
 set "GAME=C:\ROMS\Xbox 360\Universe at War - Earth Assault (USA)\Universe at War - Earth Assault (USA)"
 set "BIN=%~dp0project\out\build\win-amd64-release"
 copy /y "%~dp0rexglue-sdk\out\install\win-amd64\bin\rexgpu-xenos.dll" "%BIN%\" >nul
+copy /y "%~dp0rexglue-sdk\out\install\win-amd64\bin\rexruntime.dll" "%BIN%\" >nul
 cd /d "%BIN%"
 if exist "%~dp0logs\04_run.log" move /y "%~dp0logs\04_run.log" "%~dp0logs\04_run_previous.log" >nul
 echo Starting the game... (log: logs\04_run.log)

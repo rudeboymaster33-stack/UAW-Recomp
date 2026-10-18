@@ -20,7 +20,7 @@ echo ==== CODEGEN
 if errorlevel 1 goto :fail
 echo ==== CODEGEN OK
 echo ==== CONFIGURE
-cmake --preset win-amd64-release -DREXSDK="%SDK%"
+cmake --preset win-amd64-release -DREXSDK="%SDK%" "-DCMAKE_C_FLAGS=-march=x86-64-v3" "-DCMAKE_CXX_FLAGS=-march=x86-64-v3"
 if errorlevel 1 goto :fail
 echo ==== BUILD
 cmake --build --preset win-amd64-release --parallel 4

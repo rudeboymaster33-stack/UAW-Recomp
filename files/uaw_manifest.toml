@@ -12,6 +12,10 @@ includes = []
 # CRT setjmp/longjmp (used by libjpeg error recovery etc.)
 setjmp_address = 0x82A17F30
 longjmp_address = 0x82A184B0
+# Codegen speed options: keep these PPC registers in host locals instead of the context struct
+ctr_as_local = true
+xer_as_local = true
+cr_as_local = true
 
 [entrypoint.functions]
 0x829592C0 = { name = "sub_829592C0" }
