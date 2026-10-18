@@ -9,7 +9,7 @@ copy /y "%~dp0rexglue-sdk\out\install\win-amd64\bin\rexgpu-xenos.dll" "%BIN%\" >
 cd /d "%BIN%"
 if exist "%~dp0logs\04_run.log" move /y "%~dp0logs\04_run.log" "%~dp0logs\04_run_previous.log" >nul
 echo Starting the game... (log: logs\04_run.log)
-uaw.exe --gpu_plugin=xenos --mnk_mode=true --game_data_root="%GAME%" --log_file="%~dp0logs\04_run.log" > "%~dp0logs\04_run_console.log" 2>&1
+uaw.exe --gpu_plugin=xenos --mnk_mode=true --render_target_path_d3d12=rtv --game_data_root="%GAME%" --log_file="%~dp0logs\04_run.log" > "%~dp0logs\04_run_console.log" 2>&1
 echo Game exited with code %ERRORLEVEL% >> "%~dp0logs\04_run_console.log"
 echo Game exited (code %ERRORLEVEL%). Claude will read the log. You can close this window.
 pause
