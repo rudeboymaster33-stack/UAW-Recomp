@@ -135,3 +135,9 @@ cr_as_local = true
 [[entrypoint.midasm_hook]]
 address = 0x828C0054
 name = "UawHook_Swap"
+
+# Experimental TargetFPS override (only active when UAW_TARGET_FPS env var is set)
+[[entrypoint.midasm_hook]]
+address = 0x8225CF14
+name = "UawHook_FrameSyncInit"
+registers = ["r31"]

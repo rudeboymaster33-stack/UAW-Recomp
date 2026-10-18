@@ -105,3 +105,19 @@ void UawHook_WriteProfileBefore(PPCRegister& r5, PPCRegister& r6) {
                 GuestU32(s), GuestU32(s + 16), GuestU8(s + 24), GuestU32(s + 24), GuestU32(s + 32), GuestU32(s + 36));
   }
 }
+
+// ---- Experimental: override FrameSynchronizer TargetFPS (opt-in via env UAW_TARGET_FPS) ----
+#include <cstdlib>
+// Hook at 0x8225CF14 in FrameSynchronizer::Init, right after it stores TargetFPS (r31+24) = 30.
+void UawHook_FrameSyncInit(PPCRegister& r31) {
+  const char* env = std::getenv("UAW_TARGET_FPS");
+  auto mem = REX_KERNEL_MEMORY();
+  auto p = mem->TranslateVirtual<uint8_t*>(r31.u32);
+  auto rd = [&](int off) { return (uint32_t(p[off]) << 24) | (uint32_t(p[off + 1]) << 16) | (uint32_t(p[off + 2]) << 8) | p[off + 3]; };
+  REXLOG_WARN("[uaw-fsync] Init: TargetFPS={} mid={} LogicalFPS={}", rd(24), rd(28), rd(32));
+  if (!env || !*env) return;
+  int target = std::atoi(env);
+  if (target < 10 || target > 240) return;
+  p[24] = uint8_t(target >> 24); p[25] = uint8_t(target >> 16); p[26] = uint8_t(target >> 8); p[27] = uint8_t(target);
+  REXLOG_WARN("[uaw-fsync] TargetFPS overridden to {}", target);
+}
