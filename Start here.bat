@@ -1,6 +1,7 @@
 @echo off
 title Universe at War recomp
 :menu
+@echo off
 cls
 echo.
 echo   =============================================

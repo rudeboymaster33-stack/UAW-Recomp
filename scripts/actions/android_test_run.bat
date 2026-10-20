@@ -12,7 +12,7 @@ echo [2/4] Installing on the Retroid...
 "%ADB%" shell am force-stop com.uaw.recomp
 "%ADB%" install -r "%ROOT%UniverseAtWar.apk" > "%ROOT%logs\22_install.log" 2>&1
 if errorlevel 1 (echo INSTALL FAILED - is the Retroid plugged in? Tell Claude. & pause & exit /b 1)
-echo on> "%ROOT%logs\profile_on.txt"
+> "%ROOT%logs\profile_on.txt" echo profile
 "%ADB%" push "%ROOT%logs\profile_on.txt" %PKGDIR%/profile_on >nul 2>&1
 "%ADB%" shell rm -f %PKGDIR%/uaw.log %PKGDIR%/args.txt
 REM Extra test settings for this run (scripts\android_test_args.txt), if present.

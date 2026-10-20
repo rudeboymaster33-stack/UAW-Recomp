@@ -21,6 +21,7 @@ include(generated/rexglue.cmake)
 set(UAW_SOURCES
     src/main.cpp
     src/uaw_hooks.cpp
+    src/uaw_zlib.cpp
 )
 
 if(ANDROID)
@@ -34,3 +35,8 @@ else()
 endif()
 
 rexglue_setup_target(uaw)
+
+if(ANDROID)
+    # Native zlib for the game's decompression (src/uaw_zlib.cpp).
+    target_link_libraries(uaw PRIVATE z)
+endif()

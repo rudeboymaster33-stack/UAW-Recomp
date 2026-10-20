@@ -151,8 +151,23 @@ address = 0x8225CF14
 name = "UawHook_FrameSyncInit"
 registers = ["r31"]
 
-# Diagnostics: count zlib inflate() calls (asset streaming load)
+# Faster loading (Android): the game's zlib is replaced by native zlib
+# (project/src/uaw_zlib.cpp). Each hook returns true when it handled the call,
+# which skips the game's own code. On PC the hooks return false.
+[[entrypoint.midasm_hook]]
+address = 0x82A09B78
+name = "UawHook_ZInflateInit"
+registers = ["r3"]
+return_on_true = true
+
 [[entrypoint.midasm_hook]]
 address = 0x82A09CE0
-name = "UawHook_Inflate"
+name = "UawHook_ZInflate"
+registers = ["r3", "r4"]
+return_on_true = true
+
+[[entrypoint.midasm_hook]]
+address = 0x82A0B580
+name = "UawHook_ZInflateEnd"
 registers = ["r3"]
+return_on_true = true

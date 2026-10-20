@@ -130,6 +130,39 @@ void PaceSwap() {
     return env && *env == '1';
   }();
   if (g_pace_mode == 3 && !ab) {
+    // Optional (env UAW_MENU_FPS_CAP=1): cap frames at 30 while the world is
+    // not updating (menus, pause). Off by default: the game finishes loading a
+    // match a little per frame, so the cap made match loading ~10 s slower.
+    static const bool menu_cap = [] {
+      const char* env = std::getenv("UAW_MENU_FPS_CAP");
+      return env && *env == '1';
+    }();
+    static uint32_t last_tick = 0;
+    static int64_t last_tick_change_us = 0;
+    static int64_t menu_next_us = 0;
+    int64_t now = NowUs();
+    uint32_t tick = ReadLogicTick();
+    if (tick != last_tick || !last_tick_change_us) {
+      last_tick = tick;
+      last_tick_change_us = now;
+    }
+    if (menu_cap && now - last_tick_change_us > 200000) {
+      const int64_t interval = 33333;
+      if (!menu_next_us || now - menu_next_us > interval) {
+        menu_next_us = now;
+      }
+      while (NowUs() < menu_next_us) {
+        int64_t wait = menu_next_us - NowUs();
+        if (wait > 2000) {
+          std::this_thread::sleep_for(std::chrono::microseconds(wait - 1500));
+        } else {
+          std::this_thread::yield();
+        }
+      }
+      menu_next_us += interval;
+      return;
+    }
+    menu_next_us = 0;
     PaceToNextUpdate();
     return;
   }
@@ -190,7 +223,7 @@ void PaceStatsLog();
 // Show only frames with a new world update: the game draws ~45-50 frames a
 // second but the world updates 30 times, so the extra frames repeat the last
 // state and make motion uneven. Repeats are still drawn (the game needs them)
-// but not displayed. A frame is always shown if nothing was shown for 34 ms
+// but not displayed. A frame is always shown if nothing was shown for 30 ms
 // (menus, pauses). Env UAW_SKIP_REPEATS=0 disables; default on for Android.
 // Diagnostic env UAW_SKIP_AB=1: on for 20 s, off for 20 s.
 namespace {
@@ -214,7 +247,7 @@ bool DecideShowFrame(int64_t now) {
   }();
   g_skip_repeats_active = enabled && (!ab || ((now / 20000000) & 1) == 0);
   uint32_t tick = ReadLogicTick();
-  bool show = !g_skip_repeats_active || tick != g_shown_tick || now - g_last_shown_us >= 34000;
+  bool show = !g_skip_repeats_active || tick != g_shown_tick || now - g_last_shown_us >= 30000;
   if (show) {
     g_shown_tick = tick;
     g_last_shown_us = now;
@@ -368,6 +401,10 @@ void UawFrameSyncCounters() {
   {
     uint64_t c = g_zlib_calls.exchange(0), o = g_zlib_out_req.exchange(0), i = g_zlib_in.exchange(0);
     if (c) REXLOG_INFO("[uaw-zlib] inflate calls={} in={}KB out_space={}KB", c, i / 1024, o / 1024);
+    void UawZlibStats(uint64_t& out_bytes, uint64_t& calls);
+    uint64_t nb = 0, nc = 0;
+    UawZlibStats(nb, nc);
+    if (nc) REXLOG_INFO("[uaw-zlib] native inflate calls={} out={}KB", nc, nb / 1024);
   }
   static uint32_t s_ptr = 0;
   static std::vector<uint32_t> s_prev;
