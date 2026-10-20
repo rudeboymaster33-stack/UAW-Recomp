@@ -1,0 +1,146 @@
+From 013921943e39547460b9c6c4803b6e668060b3f0 Mon Sep 17 00:00:00 2001
+From: UAW Recomp <noreply@anthropic.com>
+Date: Mon, 19 Oct 2026 20:57:20 -0400
+Subject: [PATCH] ui/android: reconnect the presenter to the new native window
+ after returning from background
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ include/rex/ui/window_sdl.h         |  9 ++++++
+ src/ui/window_sdl.cpp               | 44 ++++++++++++++++++++++++++++-
+ src/ui/windowed_app_context_sdl.cpp | 12 ++++++++
+ 3 files changed, 64 insertions(+), 1 deletion(-)
+
+diff --git a/include/rex/ui/window_sdl.h b/include/rex/ui/window_sdl.h
+index 71e7473..a37ea39 100644
+--- a/include/rex/ui/window_sdl.h
++++ b/include/rex/ui/window_sdl.h
+@@ -42,6 +42,10 @@ class WindowSDL final : public Window {
+   void HandleMouseEvent(SDL_Event& event);
+   void HandleDropEvent(SDL_Event& event);
+   void HandlePaintEvent();
++  // Android: the app went to the background (true = came back). The native
++  // window is destroyed while in the background and a new one is created on
++  // return, so the presenter must be moved to the new surface.
++  void HandleAppLifecycle(bool foreground);
+ 
+  protected:
+   uint32_t GetLatestDpiImpl() const override;
+@@ -82,6 +86,11 @@ class WindowSDL final : public Window {
+   SDL_Window* sdl_window_ = nullptr;
+   SDL_WindowID sdl_window_id_ = 0;
+   std::atomic<bool> paint_pending_{false};
++  // Android: native window the presenter surface was created for, and whether
++  // the app is in the background (no surface may be used then).
++  void* android_attached_window_ = nullptr;
++  bool android_backgrounded_ = false;
++  void RefreshAndroidSurface();
+   // Auto-hide cursor bookkeeping (CursorVisibility::kAutoHidden).
+   SDL_TimerID cursor_hide_timer_ = 0;
+ };
+diff --git a/src/ui/window_sdl.cpp b/src/ui/window_sdl.cpp
+index c842eb6..0706aae 100644
+--- a/src/ui/window_sdl.cpp
++++ b/src/ui/window_sdl.cpp
+@@ -405,7 +405,8 @@ std::unique_ptr<Surface> WindowSDL::CreateSurfaceImpl(Surface::TypeFlags allowed
+   if (allowed_types & Surface::kTypeFlag_AndroidNativeWindow) {
+     auto* native_window = static_cast<ANativeWindow*>(
+         SDL_GetPointerProperty(props, SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr));
+-    if (native_window) {
++    if (native_window && !android_backgrounded_) {
++      android_attached_window_ = native_window;
+       return std::make_unique<AndroidNativeWindowSurface>(native_window);
+     }
+   }
+@@ -447,9 +448,48 @@ void WindowSDL::RequestPaintImpl() {
+ 
+ void WindowSDL::HandlePaintEvent() {
+   paint_pending_.store(false, std::memory_order_release);
++  RefreshAndroidSurface();
+   OnPaint();
+ }
+ 
++void WindowSDL::RefreshAndroidSurface() {
++#if REX_PLATFORM_ANDROID
++  if (android_backgrounded_ || !sdl_window_) {
++    return;
++  }
++  void* native_window = SDL_GetPointerProperty(SDL_GetWindowProperties(sdl_window_),
++                                               SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr);
++  if (native_window != android_attached_window_) {
++    // A new native window (after returning from the background) or none.
++    REXLOG_INFO("WindowSDL: Android native window changed ({} -> {}), reconnecting the presenter",
++                android_attached_window_, native_window);
++    android_attached_window_ = nullptr;
++    OnSurfaceChanged(native_window != nullptr);
++  }
++#endif
++}
++
++void WindowSDL::HandleAppLifecycle(bool foreground) {
++#if REX_PLATFORM_ANDROID
++  if (!foreground) {
++    if (!android_backgrounded_) {
++      android_backgrounded_ = true;
++      // Stop using the surface before Android destroys the native window.
++      if (android_attached_window_) {
++        android_attached_window_ = nullptr;
++        OnSurfaceChanged(false);
++      }
++    }
++  } else if (android_backgrounded_) {
++    android_backgrounded_ = false;
++    RefreshAndroidSurface();
++    RequestPaint();
++  }
++#else
++  (void)foreground;
++#endif
++}
++
+ void WindowSDL::HandleWindowEvent(SDL_Event& event) {
+   WindowDestructionReceiver destruction_receiver(this);
+   switch (event.type) {
+@@ -491,6 +531,7 @@ void WindowSDL::HandleWindowEvent(SDL_Event& event) {
+       OnFocusUpdate(false, destruction_receiver);
+       break;
+     case SDL_EVENT_WINDOW_EXPOSED:
++      RefreshAndroidSurface();
+       // The platform cannot retain the previous image; force the paint.
+       OnPaint(true);
+       break;
+@@ -498,6 +539,7 @@ void WindowSDL::HandleWindowEvent(SDL_Event& event) {
+       OnMinimized(destruction_receiver);
+       break;
+     case SDL_EVENT_WINDOW_RESTORED:
++      RefreshAndroidSurface();
+       OnRestored(destruction_receiver);
+       break;
+     case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+diff --git a/src/ui/windowed_app_context_sdl.cpp b/src/ui/windowed_app_context_sdl.cpp
+index dc0b4c2..36307e4 100644
+--- a/src/ui/windowed_app_context_sdl.cpp
++++ b/src/ui/windowed_app_context_sdl.cpp
+@@ -130,6 +130,18 @@ void SDLWindowedAppContext::ProcessEvent(SDL_Event& event) {
+     return;
+   }
+   switch (event.type) {
++    case SDL_EVENT_WILL_ENTER_BACKGROUND:
++    case SDL_EVENT_DID_ENTER_BACKGROUND:
++      for (auto& [id, window] : windows_) {
++        window->HandleAppLifecycle(false);
++      }
++      break;
++    case SDL_EVENT_WILL_ENTER_FOREGROUND:
++    case SDL_EVENT_DID_ENTER_FOREGROUND:
++      for (auto& [id, window] : windows_) {
++        window->HandleAppLifecycle(true);
++      }
++      break;
+     case SDL_EVENT_QUIT:
+       if (synchronously_handled_quit_events_ != 0) {
+         --synchronously_handled_quit_events_;
+-- 
+2.43.0
+

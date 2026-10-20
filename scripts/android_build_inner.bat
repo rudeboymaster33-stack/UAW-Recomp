@@ -66,7 +66,10 @@ jar cf "%APKW%\classes.jar" -C "%APKW%\classes" .
 if errorlevel 1 goto :fail
 java -cp "%BT%\lib\d8.jar" com.android.tools.r8.D8 --release --min-api 31 --lib "%PLAT%" --output "%APKW%\dex" "%APKW%\classes.jar"
 if errorlevel 1 goto :fail
-"%BT%\aapt2.exe" link -o "%APKW%\base.apk" -I "%PLAT%" --manifest "%ROOT%android\AndroidManifest.xml" --min-sdk-version 31 --target-sdk-version 35
+REM App icon and other resources from android\res
+"%BT%\aapt2.exe" compile --dir "%ROOT%android\res" -o "%APKW%\res.zip"
+if errorlevel 1 goto :fail
+"%BT%\aapt2.exe" link -o "%APKW%\base.apk" -I "%PLAT%" --manifest "%ROOT%android\AndroidManifest.xml" --min-sdk-version 31 --target-sdk-version 35 "%APKW%\res.zip"
 if errorlevel 1 goto :fail
 copy /y "%GBUILD%\libmain.so" "%APKW%\apk\lib\arm64-v8a\" || goto :fail
 copy /y "%SDKINST%\lib\librexruntime.so" "%APKW%\apk\lib\arm64-v8a\" || goto :fail

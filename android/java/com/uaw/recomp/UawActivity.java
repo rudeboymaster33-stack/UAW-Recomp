@@ -41,6 +41,8 @@ public class UawActivity extends SDLActivity {
         new File(b, "game").mkdirs();
         new File(b, "userdata").mkdirs();
 
+        String gameDir = b + "/game";
+
         ArrayList<String> args = new ArrayList<>();
         args.add("--gpu_plugin=xenos");
         // Same as the PC launcher: occlusion queries make the game wait for GPU
@@ -60,7 +62,7 @@ public class UawActivity extends SDLActivity {
         args.add("--vulkan_allow_present_mode_immediate=false");
         args.add("--vulkan_allow_present_mode_mailbox=false");
         args.add("--vulkan_allow_present_mode_fifo_relaxed=false");
-        args.add("--game_data_root=" + b + "/game");
+        args.add("--game_data_root=" + gameDir);
         args.add("--user_data_root=" + b + "/userdata");
         args.add("--log_file=" + b + "/uaw.log");
 
