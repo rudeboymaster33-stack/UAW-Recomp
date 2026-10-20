@@ -62,6 +62,10 @@ public class UawActivity extends SDLActivity {
         args.add("--vulkan_allow_present_mode_immediate=false");
         args.add("--vulkan_allow_present_mode_mailbox=false");
         args.add("--vulkan_allow_present_mode_fifo_relaxed=false");
+        // Picture: FXAA smooths edges (the main scene has no MSAA), and AMD FSR 1
+        // upscales the 1280x720 game image to the 1080p screen with sharpening.
+        args.add("--swap_post_effect=fxaa");
+        args.add("--present_effect=fsr");
         args.add("--game_data_root=" + gameDir);
         args.add("--user_data_root=" + b + "/userdata");
         args.add("--log_file=" + b + "/uaw.log");

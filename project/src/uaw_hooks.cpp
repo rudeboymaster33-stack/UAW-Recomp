@@ -224,8 +224,19 @@ bool DecideShowFrame(int64_t now) {
 }
 }  // namespace
 
+// Paused while the Android app is in the background: the game's main loop
+// (which runs the world updates and drawing) waits here until resumed.
+std::atomic<bool> g_uaw_paused{false};
+void UawSetPaused(bool paused) {
+  g_uaw_paused.store(paused, std::memory_order_release);
+  REXLOG_INFO("[uaw] game {}", paused ? "paused (app in background)" : "resumed");
+}
+
 // Called right before the game's VdSwap (0x828C0054): one call per presented guest frame.
 void UawHook_Swap() {
+  while (g_uaw_paused.load(std::memory_order_acquire)) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
   PaceSwap();
   RefreshGuestTickCount();
   rex::graphics::swap_hints::PushGuestSwap(DecideShowFrame(NowUs()));
