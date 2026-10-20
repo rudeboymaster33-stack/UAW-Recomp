@@ -136,6 +136,15 @@ cr_as_local = true
 address = 0x828C0054
 name = "UawHook_Swap"
 
+# Game-speed fix: FrameSynchronizer sets "last update time = now" when it runs a
+# world update, throwing away the time past 33 ms. Keep it (last += 33 ms) so the
+# world runs at a true 30 updates/s at any frame rate. Hook is before
+# "stw r19,80(r27)" in sub_8225C528 (r19 = now ms, r27 = FrameSynchronizer).
+[[entrypoint.midasm_hook]]
+address = 0x8225C6A4
+name = "UawHook_TickCarry"
+registers = ["r19", "r27"]
+
 # Experimental TargetFPS override (only active when UAW_TARGET_FPS env var is set)
 [[entrypoint.midasm_hook]]
 address = 0x8225CF14

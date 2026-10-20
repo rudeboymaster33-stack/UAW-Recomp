@@ -1,0 +1,420 @@
+From 0fb82f5176a8ecad5707324c304001bca263ff87 Mon Sep 17 00:00:00 2001
+From: UAW Recomp <noreply@anthropic.com>
+Date: Sun, 18 Oct 2026 17:54:38 -0400
+Subject: [PATCH] vulkan: GPU timestamp profiler per pass category ([gpu-time])
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ .../rex/graphics/vulkan/command_processor.h   |  41 ++++
+ .../graphics/vulkan/deferred_command_buffer.h |  15 ++
+ .../rex/ui/vulkan/functions/device_1_0.inc    |   2 +
+ src/graphics/vulkan/command_processor.cpp     | 203 ++++++++++++++++++
+ .../vulkan/deferred_command_buffer.cpp        |   5 +
+ 5 files changed, 266 insertions(+)
+
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+index c72b132..e96e284 100644
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -804,6 +804,47 @@ class VulkanCommandProcessor : public CommandProcessor {
+   void FinalizePassRenderArea();
+   void NotePassDrawScissor(const VkRect2D& scissor);
+ 
++  // GPU timestamp profiling (vulkan_gpu_timestamps): every submission records
++  // timestamps at pass boundaries so GPU time can be split into categories.
++  enum GpuTimeSeg : uint8_t {
++    kGpuSegOutside = 0,  // Barriers, copies, uploads, compute between passes.
++    kGpuSegDrawPass,
++    kGpuSegTransferPass,
++    kGpuSegSwapPass,
++    kGpuSegCount
++  };
++  static constexpr uint32_t kGpuTsPoolSize = 16384;
++  static constexpr uint32_t kGpuTsBatchMax = 2048;
++  struct GpuTsBatch {
++    uint64_t submission;
++    uint32_t first;
++    uint32_t count;
++    std::vector<uint32_t> tags;  // Segment category | (extent key index << 8).
++  };
++  VkQueryPool gpu_ts_pool_ = VK_NULL_HANDLE;
++  bool gpu_ts_init_attempted_ = false;
++  double gpu_ts_period_ns_ = 1.0;
++  uint64_t gpu_ts_valid_mask_ = ~uint64_t(0);
++  uint32_t gpu_ts_ring_next_ = 0;
++  bool gpu_ts_open_ = false;
++  GpuTsBatch gpu_ts_current_;
++  std::deque<GpuTsBatch> gpu_ts_pending_;
++  uint64_t gpu_ts_last_end_ = 0;
++  uint64_t gpu_ts_last_submission_ = 0;
++  double gpu_ts_ns_[kGpuSegCount] = {};
++  double gpu_ts_idle_ns_ = 0.0;
++  uint64_t gpu_ts_batches_read_ = 0;
++  uint64_t gpu_ts_batches_skipped_ = 0;
++  uint32_t gpu_ts_extent_keys_[8] = {};
++  double gpu_ts_extent_ns_[8] = {};
++  uint32_t gpu_ts_extent_passes_[8] = {};
++  void GpuTsBeginSubmission();
++  void GpuTsMark(uint32_t tag);
++  void GpuTsEndSubmission();
++  void GpuTsCollect();
++  uint32_t GpuTsExtentTag(const VkExtent2D& extent);
++  void GpuTsLog(double frames);
++
+   // Currently bound graphics pipeline, either from the pipeline cache (with
+   // potentially deferred creation - current_external_graphics_pipeline_ is
+   // VK_NULL_HANDLE in this case) or a non-Xenos one
+diff --git a/include/rex/graphics/vulkan/deferred_command_buffer.h b/include/rex/graphics/vulkan/deferred_command_buffer.h
+index a058fb5..751199e 100644
+--- a/include/rex/graphics/vulkan/deferred_command_buffer.h
++++ b/include/rex/graphics/vulkan/deferred_command_buffer.h
+@@ -270,6 +270,14 @@ class DeferredCommandBuffer {
+   size_t GetLastCommandArgumentsOffset() const { return last_arguments_offset_; }
+   void PatchBeginRenderingRenderArea(size_t arguments_offset, const VkRect2D& render_area);
+ 
++  void CmdVkWriteTimestamp(VkPipelineStageFlagBits stage, VkQueryPool query_pool, uint32_t query) {
++    auto& args = *reinterpret_cast<ArgsVkWriteTimestamp*>(
++        WriteCommand(Command::kVkWriteTimestamp, sizeof(ArgsVkWriteTimestamp)));
++    args.stage = stage;
++    args.query_pool = query_pool;
++    args.query = query;
++  }
++
+   void CmdVkResetQueryPool(VkQueryPool query_pool, uint32_t first_query, uint32_t query_count) {
+     auto& args = *reinterpret_cast<ArgsVkResetQueryPool*>(
+         WriteCommand(Command::kVkResetQueryPool, sizeof(ArgsVkResetQueryPool)));
+@@ -358,6 +366,7 @@ class DeferredCommandBuffer {
+ 
+  private:
+   enum class Command {
++    kVkWriteTimestamp,
+     kVkBeginRenderPass,
+     kVkBeginQuery,
+     kVkBindDescriptorSets,
+@@ -395,6 +404,12 @@ class DeferredCommandBuffer {
+   static constexpr size_t kCommandHeaderSizeElements =
+       (sizeof(CommandHeader) + sizeof(uintmax_t) - 1) / sizeof(uintmax_t);
+ 
++  struct ArgsVkWriteTimestamp {
++    VkPipelineStageFlagBits stage;
++    VkQueryPool query_pool;
++    uint32_t query;
++  };
++
+   struct ArgsVkBeginRenderPass {
+     VkRenderPass render_pass;
+     VkFramebuffer framebuffer;
+diff --git a/include/rex/ui/vulkan/functions/device_1_0.inc b/include/rex/ui/vulkan/functions/device_1_0.inc
+index aa55a4a..1fc3e01 100644
+--- a/include/rex/ui/vulkan/functions/device_1_0.inc
++++ b/include/rex/ui/vulkan/functions/device_1_0.inc
+@@ -82,3 +82,5 @@ XE_UI_VULKAN_FUNCTION(vkQueueSubmit)
+ XE_UI_VULKAN_FUNCTION(vkUnmapMemory)
+ XE_UI_VULKAN_FUNCTION(vkUpdateDescriptorSets)
+ XE_UI_VULKAN_FUNCTION(vkWaitForFences)
++XE_UI_VULKAN_FUNCTION(vkCmdWriteTimestamp)
++XE_UI_VULKAN_FUNCTION(vkGetQueryPoolResults)
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index c48978d..aa249fb 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -68,6 +68,9 @@ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
+                     "Use VK_KHR_dynamic_rendering for Vulkan GPU emulation when supported by the "
+                     "device (falls back to render passes otherwise)")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_BOOL(vulkan_gpu_timestamps, false, "GPU",
++                    "Profile GPU time per category (passes, transfers, outside-pass work) "
++                    "with timestamp queries and log [gpu-time] lines");
+ REXCVAR_DEFINE_BOOL(vulkan_tight_render_area, true, "GPU",
+                     "Shrink each render pass to the area guest draws actually touch "
+                     "(large win on tile-based mobile GPUs)");
+@@ -2303,6 +2306,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+           "shm_uploads={:.1f} shm_upload={:.0f}KB tight_area={:.2f}MPix extents(per frame):{}",
+           st.pass_breaks / f, st.buffer_barriers / f, st.image_barriers / f, st.shm_uploads / f,
+           st.shm_upload_kb / f, st.tight_area_kpix / f / 1000.0, extents);
++      GpuTsLog(f);
+       st = GpuFrameStats{};
+     }
+   }
+@@ -2889,6 +2893,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+           render_pass_begin_info.renderArea.extent.height = guest_output_height;
+           render_pass_begin_info.clearValueCount = 0;
+           render_pass_begin_info.pClearValues = nullptr;
++          GpuTsMark(kGpuSegSwapPass);
+           deferred_command_buffer_.CmdVkBeginRenderPass(&render_pass_begin_info,
+                                                         VK_SUBPASS_CONTENTS_INLINE);
+ 
+@@ -2940,6 +2945,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+ 
+           deferred_command_buffer_.CmdVkDraw(3, 1, 0, 0);
+           deferred_command_buffer_.CmdVkEndRenderPass();
++          GpuTsMark(kGpuSegOutside);
+ 
+           // Insert the release barrier.
+           PushImageMemoryBarrier(vulkan_context.image(), guest_output_subresource_range,
+@@ -3158,6 +3164,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+ 
+   current_render_pass_ = use_dynamic_rendering ? VK_NULL_HANDLE : render_pass;
+   current_framebuffer_ = framebuffer;
++  GpuTsMark(kGpuSegDrawPass | GpuTsExtentTag(framebuffer->host_extent));
+   {
+     GpuFrameStats& st = GetGpuFrameStats();
+     ++st.passes;
+@@ -3257,6 +3264,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+ 
+   current_render_pass_ = use_dynamic_rendering ? VK_NULL_HANDLE : render_pass;
+   current_framebuffer_ = framebuffer;
++  GpuTsMark(kGpuSegTransferPass);
+ 
+   if (use_dynamic_rendering) {
+     VkRenderingAttachmentInfo color_attachment = {};
+@@ -3354,6 +3362,190 @@ void VulkanCommandProcessor::FinalizePassRenderArea() {
+   GetGpuFrameStats().tight_area_kpix += uint64_t(area.extent.width) * area.extent.height / 1000;
+ }
+ 
++uint32_t VulkanCommandProcessor::GpuTsExtentTag(const VkExtent2D& extent) {
++  if (gpu_ts_pool_ == VK_NULL_HANDLE) {
++    return 0;
++  }
++  uint32_t key = (extent.width << 16) | (extent.height & 0xFFFF);
++  for (uint32_t i = 0; i < 8; ++i) {
++    if (gpu_ts_extent_keys_[i] == key || !gpu_ts_extent_keys_[i]) {
++      gpu_ts_extent_keys_[i] = key;
++      return (i + 1) << 8;
++    }
++  }
++  return 0;
++}
++
++void VulkanCommandProcessor::GpuTsMark(uint32_t tag) {
++  if (!gpu_ts_open_ || !submission_open_) {
++    return;
++  }
++  GpuTsBatch& b = gpu_ts_current_;
++  // Keep the last slot for the end-of-submission mark.
++  if (b.count + 1 >= kGpuTsBatchMax) {
++    return;
++  }
++  deferred_command_buffer_.CmdVkWriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gpu_ts_pool_,
++                                               b.first + b.count);
++  b.tags.push_back(tag);
++  ++b.count;
++}
++
++void VulkanCommandProcessor::GpuTsBeginSubmission() {
++  gpu_ts_open_ = false;
++  if (!REXCVAR_GET(vulkan_gpu_timestamps)) {
++    return;
++  }
++  const ui::vulkan::VulkanDevice* vulkan_device = GetVulkanDevice();
++  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++  VkDevice device = vulkan_device->device();
++  if (!gpu_ts_init_attempted_) {
++    gpu_ts_init_attempted_ = true;
++    const ui::vulkan::VulkanInstance::Functions& ifn = vulkan_device->vulkan_instance()->functions();
++    VkPhysicalDeviceProperties props;
++    ifn.vkGetPhysicalDeviceProperties(vulkan_device->physical_device(), &props);
++    uint32_t family_count = 0;
++    ifn.vkGetPhysicalDeviceQueueFamilyProperties(vulkan_device->physical_device(), &family_count,
++                                                 nullptr);
++    std::vector<VkQueueFamilyProperties> families(family_count);
++    ifn.vkGetPhysicalDeviceQueueFamilyProperties(vulkan_device->physical_device(), &family_count,
++                                                 families.data());
++    uint32_t family = vulkan_device->queue_family_graphics_compute();
++    uint32_t valid_bits = family < family_count ? families[family].timestampValidBits : 0;
++    if (!valid_bits || props.limits.timestampPeriod <= 0.0f) {
++      REXGPU_WARN("[gpu-time] timestamps not supported on the graphics queue");
++      return;
++    }
++    gpu_ts_valid_mask_ = valid_bits >= 64 ? ~uint64_t(0) : ((uint64_t(1) << valid_bits) - 1);
++    gpu_ts_period_ns_ = props.limits.timestampPeriod;
++    VkQueryPoolCreateInfo pool_info = {};
++    pool_info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
++    pool_info.queryType = VK_QUERY_TYPE_TIMESTAMP;
++    pool_info.queryCount = kGpuTsPoolSize;
++    if (dfn.vkCreateQueryPool(device, &pool_info, nullptr, &gpu_ts_pool_) != VK_SUCCESS) {
++      gpu_ts_pool_ = VK_NULL_HANDLE;
++      REXGPU_WARN("[gpu-time] failed to create the timestamp query pool");
++      return;
++    }
++    REXGPU_INFO("[gpu-time] enabled: period={}ns valid_bits={}", gpu_ts_period_ns_, valid_bits);
++  }
++  if (gpu_ts_pool_ == VK_NULL_HANDLE) {
++    return;
++  }
++  GpuTsCollect();
++  uint32_t first = gpu_ts_ring_next_;
++  if (first + kGpuTsBatchMax > kGpuTsPoolSize) {
++    first = 0;
++  }
++  for (const GpuTsBatch& p : gpu_ts_pending_) {
++    if (first < p.first + kGpuTsBatchMax && p.first < first + kGpuTsBatchMax) {
++      ++gpu_ts_batches_skipped_;
++      return;
++    }
++  }
++  gpu_ts_ring_next_ = first + kGpuTsBatchMax;
++  gpu_ts_current_.submission = GetCurrentSubmission();
++  gpu_ts_current_.first = first;
++  gpu_ts_current_.count = 0;
++  gpu_ts_current_.tags.clear();
++  deferred_command_buffer_.CmdVkResetQueryPool(gpu_ts_pool_, first, kGpuTsBatchMax);
++  gpu_ts_open_ = true;
++  GpuTsMark(kGpuSegOutside);
++}
++
++void VulkanCommandProcessor::GpuTsEndSubmission() {
++  if (!gpu_ts_open_) {
++    return;
++  }
++  GpuTsBatch& b = gpu_ts_current_;
++  deferred_command_buffer_.CmdVkWriteTimestamp(VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, gpu_ts_pool_,
++                                               b.first + b.count);
++  b.tags.push_back(kGpuSegOutside);
++  ++b.count;
++  gpu_ts_pending_.push_back(std::move(b));
++  gpu_ts_current_ = GpuTsBatch{};
++  gpu_ts_open_ = false;
++}
++
++void VulkanCommandProcessor::GpuTsCollect() {
++  if (gpu_ts_pool_ == VK_NULL_HANDLE) {
++    return;
++  }
++  const ui::vulkan::VulkanDevice* vulkan_device = GetVulkanDevice();
++  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++  VkDevice device = vulkan_device->device();
++  std::vector<uint64_t> ts;
++  while (!gpu_ts_pending_.empty() && gpu_ts_pending_.front().submission <= submission_completed_) {
++    GpuTsBatch& b = gpu_ts_pending_.front();
++    if (b.count >= 2) {
++      ts.resize(b.count);
++      VkResult r = dfn.vkGetQueryPoolResults(device, gpu_ts_pool_, b.first, b.count,
++                                             sizeof(uint64_t) * b.count, ts.data(),
++                                             sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
++      if (r == VK_SUCCESS) {
++        for (uint32_t i = 0; i + 1 < b.count; ++i) {
++          double ns = double((ts[i + 1] - ts[i]) & gpu_ts_valid_mask_) * gpu_ts_period_ns_;
++          if (ns > 1.0e9) {
++            continue;  // Wraparound or garbage.
++          }
++          uint32_t tag = b.tags[i];
++          uint32_t cat = tag & 0xFF;
++          if (cat < kGpuSegCount) {
++            gpu_ts_ns_[cat] += ns;
++          }
++          uint32_t ext = (tag >> 8) & 0xFF;
++          if (ext >= 1 && ext <= 8) {
++            gpu_ts_extent_ns_[ext - 1] += ns;
++            ++gpu_ts_extent_passes_[ext - 1];
++          }
++        }
++        if (gpu_ts_last_submission_ && b.submission == gpu_ts_last_submission_ + 1) {
++          double idle = double((ts[0] - gpu_ts_last_end_) & gpu_ts_valid_mask_) * gpu_ts_period_ns_;
++          if (idle < 1.0e9) {
++            gpu_ts_idle_ns_ += idle;
++          }
++        }
++        gpu_ts_last_end_ = ts[b.count - 1];
++        gpu_ts_last_submission_ = b.submission;
++        ++gpu_ts_batches_read_;
++      } else {
++        ++gpu_ts_batches_skipped_;
++      }
++    }
++    gpu_ts_pending_.pop_front();
++  }
++}
++
++void VulkanCommandProcessor::GpuTsLog(double frames) {
++  if (gpu_ts_pool_ == VK_NULL_HANDLE || frames <= 0.0) {
++    return;
++  }
++  double ms = 1.0e-6 / frames;
++  double busy = 0.0;
++  for (uint32_t i = 0; i < kGpuSegCount; ++i) {
++    busy += gpu_ts_ns_[i];
++  }
++  std::string extents;
++  for (uint32_t i = 0; i < 8 && gpu_ts_extent_keys_[i]; ++i) {
++    extents += fmt::format(" {}x{}:{:.2f}ms/{:.1f}", gpu_ts_extent_keys_[i] >> 16,
++                           gpu_ts_extent_keys_[i] & 0xFFFF, gpu_ts_extent_ns_[i] * ms,
++                           gpu_ts_extent_passes_[i] / frames);
++  }
++  REXGPU_INFO(
++      "[gpu-time] per frame ms: busy={:.2f} outside_passes={:.2f} draw_passes={:.2f} "
++      "transfer_passes={:.2f} swap={:.2f} idle_between_submits={:.2f} batches={} skipped={}",
++      busy * ms, gpu_ts_ns_[kGpuSegOutside] * ms, gpu_ts_ns_[kGpuSegDrawPass] * ms,
++      gpu_ts_ns_[kGpuSegTransferPass] * ms, gpu_ts_ns_[kGpuSegSwapPass] * ms,
++      gpu_ts_idle_ns_ * ms, gpu_ts_batches_read_, gpu_ts_batches_skipped_);
++  REXGPU_INFO("[gpu-time2] draw pass ms/passes per frame by size:{}", extents);
++  std::fill(std::begin(gpu_ts_ns_), std::end(gpu_ts_ns_), 0.0);
++  std::fill(std::begin(gpu_ts_extent_ns_), std::end(gpu_ts_extent_ns_), 0.0);
++  std::fill(std::begin(gpu_ts_extent_passes_), std::end(gpu_ts_extent_passes_), 0u);
++  gpu_ts_idle_ns_ = 0.0;
++  gpu_ts_batches_read_ = 0;
++  gpu_ts_batches_skipped_ = 0;
++}
++
+ void VulkanCommandProcessor::EndRenderPass() {
+   assert_true(submission_open_);
+   if (!in_render_pass_) {
+@@ -3368,6 +3560,7 @@ void VulkanCommandProcessor::EndRenderPass() {
+   current_render_pass_ = VK_NULL_HANDLE;
+   current_framebuffer_ = nullptr;
+   in_render_pass_ = false;
++  GpuTsMark(kGpuSegOutside);
+ }
+ 
+ VkDescriptorSet VulkanCommandProcessor::AllocateSingleTransientDescriptor(
+@@ -4905,6 +5098,13 @@ void VulkanCommandProcessor::ShutdownOcclusionQueryResources() {
+   if (occlusion_query_pool_ != VK_NULL_HANDLE) {
+     dfn.vkDestroyQueryPool(device, occlusion_query_pool_, nullptr);
+   }
++  if (gpu_ts_pool_ != VK_NULL_HANDLE) {
++    dfn.vkDestroyQueryPool(device, gpu_ts_pool_, nullptr);
++    gpu_ts_pool_ = VK_NULL_HANDLE;
++  }
++  gpu_ts_pending_.clear();
++  gpu_ts_open_ = false;
++  gpu_ts_init_attempted_ = false;
+ 
+   occlusion_query_pool_ = VK_NULL_HANDLE;
+   occlusion_query_readback_buffer_ = VK_NULL_HANDLE;
+@@ -5265,6 +5465,8 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+     primitive_processor_->BeginSubmission();
+ 
+     texture_cache_->BeginSubmission(GetCurrentSubmission());
++
++    GpuTsBeginSubmission();
+   }
+ 
+   if (is_opening_frame) {
+@@ -5491,6 +5693,7 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+       REXGPU_ERROR("Failed to begin a Vulkan command buffer");
+       return false;
+     }
++    GpuTsEndSubmission();
+     deferred_command_buffer_.Execute(command_buffer.buffer);
+     if (dfn.vkEndCommandBuffer(command_buffer.buffer) != VK_SUCCESS) {
+       REXGPU_ERROR("Failed to end a Vulkan command buffer");
+diff --git a/src/graphics/vulkan/deferred_command_buffer.cpp b/src/graphics/vulkan/deferred_command_buffer.cpp
+index 5b63c6d..423eb21 100644
+--- a/src/graphics/vulkan/deferred_command_buffer.cpp
++++ b/src/graphics/vulkan/deferred_command_buffer.cpp
+@@ -266,6 +266,11 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
+             reinterpret_cast<const uint8_t*>(stream) + sizeof(ArgsVkPushConstants));
+       } break;
+ 
++      case Command::kVkWriteTimestamp: {
++        auto& args = *reinterpret_cast<const ArgsVkWriteTimestamp*>(stream);
++        dfn.vkCmdWriteTimestamp(command_buffer, args.stage, args.query_pool, args.query);
++      } break;
++
+       case Command::kVkResetQueryPool: {
+         auto& args = *reinterpret_cast<const ArgsVkResetQueryPool*>(stream);
+         dfn.vkCmdResetQueryPool(command_buffer, args.query_pool, args.first_query,
+-- 
+2.43.0
+

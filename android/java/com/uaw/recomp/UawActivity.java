@@ -50,6 +50,16 @@ public class UawActivity extends SDLActivity {
         args.add("--anisotropic_override=-1");
         args.add("--gamma_render_target_as_unorm16=false");
         args.add("--snorm16_render_target_full_range=false");
+        // Draw the main 3D scene (4x MSAA, 320-pixel tiles) without MSAA:
+        // roughly halves GPU time on the Retroid. Other MSAA targets keep MSAA
+        // (forcing them too breaks shadows and the sky).
+        args.add("--gpu_force_msaa_1x=true");
+        args.add("--gpu_force_msaa_1x_pitch=320");
+        // Evenly paced frames: FIFO presentation, each frame scheduled on the
+        // display refresh grid (VK_GOOGLE_display_timing).
+        args.add("--vulkan_allow_present_mode_immediate=false");
+        args.add("--vulkan_allow_present_mode_mailbox=false");
+        args.add("--vulkan_allow_present_mode_fifo_relaxed=false");
         args.add("--game_data_root=" + b + "/game");
         args.add("--user_data_root=" + b + "/userdata");
         args.add("--log_file=" + b + "/uaw.log");

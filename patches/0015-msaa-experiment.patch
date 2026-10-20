@@ -1,0 +1,111 @@
+From 78c1f0f3a39da7a0f24c0a5c08286803af4dc153 Mon Sep 17 00:00:00 2001
+From: UAW Recomp <noreply@anthropic.com>
+Date: Sun, 18 Oct 2026 19:06:12 -0400
+Subject: [PATCH] vulkan: MSAA pass cost experiment ([gpu-exp]) and per-pass
+ vertex counts
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ .../rex/graphics/vulkan/command_processor.h   |  6 ++++
+ src/graphics/vulkan/command_processor.cpp     | 33 +++++++++++++++++--
+ 2 files changed, 37 insertions(+), 2 deletions(-)
+
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+index 3eb95c9..fdb7efe 100644
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -856,6 +856,12 @@ class VulkanCommandProcessor : public CommandProcessor {
+   uint64_t gpu_ts_slot_area_kpix_[kGpuTsSlots] = {};
+   uint32_t gpu_ts_slot_cpu_passes_[kGpuTsSlots] = {};
+   uint32_t gpu_ts_cur_slot_ = 0;  // 1-based, 0 = not in a tracked draw pass.
++  uint64_t gpu_ts_slot_verts_[kGpuTsSlots] = {};
++  // Diagnostic experiment (vulkan_debug_msaa_experiment): cycles every 600
++  // frames between 0 = normal, 1 = 1x1 scissor in 4x MSAA passes (geometry
++  // cost only), 2 = skip draws in 4x MSAA passes (pass overhead only).
++  uint64_t msaa_experiment_frames_ = 0;
++  uint32_t msaa_experiment_mode_ = 0;
+   // Pass-break attribution: return address of the code that pushed the last
+   // barrier, counted when that barrier breaks an open render pass.
+   void* last_barrier_pusher_ = nullptr;
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index da51b09..67f6f40 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -71,6 +71,9 @@ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
+ REXCVAR_DEFINE_BOOL(vulkan_skip_faked_query_draws, true, "GPU",
+                     "When occlusion_query_enable is off (results are faked), skip draws made "
+                     "inside a guest occlusion query that write no color, depth or stencil");
++REXCVAR_DEFINE_BOOL(vulkan_debug_msaa_experiment, false, "GPU",
++                    "Diagnostic only (breaks visuals): every 600 frames cycle between normal, "
++                    "1x1 scissor and skipped draws in 4x MSAA passes, logged as [gpu-exp]");
+ REXCVAR_DEFINE_BOOL(vulkan_gpu_timestamps, false, "GPU",
+                     "Profile GPU time per category (passes, transfers, outside-pass work) "
+                     "with timestamp queries and log [gpu-time] lines");
+@@ -2321,6 +2324,17 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+     REXGPU_INFO("[gpu-trace] end of frame");
+     pass_trace_.clear();
+   }
++  if (REXCVAR_GET(vulkan_debug_msaa_experiment)) {
++    uint32_t mode = uint32_t((msaa_experiment_frames_++ / 600) % 3);
++    if (mode != msaa_experiment_mode_) {
++      REXGPU_INFO("[gpu-exp] switching to mode {} ({})", mode,
++                  mode == 0 ? "normal" : mode == 1 ? "1x1 scissor in MSAA passes"
++                                                   : "skip draws in MSAA passes");
++      msaa_experiment_mode_ = mode;
++    }
++  } else {
++    msaa_experiment_mode_ = 0;
++  }
+   if (pass_trace_frame_countdown_ && REXCVAR_GET(vulkan_gpu_timestamps)) {
+     if (--pass_trace_frame_countdown_ == 0) {
+       pass_trace_active_ = true;
+@@ -3625,14 +3639,15 @@ void VulkanCommandProcessor::GpuTsLog(double frames) {
+     REXGPU_INFO(
+         "[gpu-time3] {}x{} msaa={} used=0x{:02X} depth_fmt={} color_fmts={},{},{},{} xfer={}: "
+         "{:.2f}ms/frame passes={:.1f}/frame draws/pass={:.1f} avg_area={:.0f}Kpix "
+-        "us/pass={:.0f}",
++        "us/pass={:.0f} kverts/frame={:.0f} mode={}",
+         ext >> 16, ext & 0xFFFF, 1u << uint32_t(rpk.msaa_samples), uint32_t(rpk.depth_and_color_used),
+         uint32_t(rpk.depth_format), uint32_t(rpk.color_0_view_format),
+         uint32_t(rpk.color_1_view_format), uint32_t(rpk.color_2_view_format),
+         uint32_t(rpk.color_3_view_format), uint32_t(rpk.color_rts_use_transfer_formats),
+         gpu_ts_slot_ns_[i] * ms, gpu_ts_slot_passes_[i] / frames,
+         gpu_ts_slot_draws_[i] / cpu_passes, gpu_ts_slot_area_kpix_[i] / cpu_passes,
+-        gpu_ts_slot_passes_[i] ? gpu_ts_slot_ns_[i] / gpu_ts_slot_passes_[i] / 1000.0 : 0.0);
++        gpu_ts_slot_passes_[i] ? gpu_ts_slot_ns_[i] / gpu_ts_slot_passes_[i] / 1000.0 : 0.0,
++        gpu_ts_slot_verts_[i] / frames / 1000.0, msaa_experiment_mode_);
+   }
+   std::fill(std::begin(gpu_ts_ns_), std::end(gpu_ts_ns_), 0.0);
+   std::fill(std::begin(gpu_ts_slot_ns_), std::end(gpu_ts_slot_ns_), 0.0);
+@@ -3640,6 +3655,7 @@ void VulkanCommandProcessor::GpuTsLog(double frames) {
+   std::fill(std::begin(gpu_ts_slot_draws_), std::end(gpu_ts_slot_draws_), uint64_t(0));
+   std::fill(std::begin(gpu_ts_slot_area_kpix_), std::end(gpu_ts_slot_area_kpix_), uint64_t(0));
+   std::fill(std::begin(gpu_ts_slot_cpu_passes_), std::end(gpu_ts_slot_cpu_passes_), 0u);
++  std::fill(std::begin(gpu_ts_slot_verts_), std::end(gpu_ts_slot_verts_), uint64_t(0));
+   // Fresh slots each period so menu-time pass types do not crowd out battle ones.
+   std::fill(std::begin(gpu_ts_slot_keys_), std::end(gpu_ts_slot_keys_), uint64_t(0));
+   gpu_ts_cur_slot_ = 0;
+@@ -4616,6 +4632,19 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+   if (pass_trace_active_) {
+     ++pass_trace_draws_;
+   }
++  if (gpu_ts_cur_slot_) {
++    gpu_ts_slot_verts_[gpu_ts_cur_slot_ - 1] += primitive_processing_result.host_draw_vertex_count;
++  }
++  if (msaa_experiment_mode_ &&
++      render_target_cache_->last_update_render_pass_key().msaa_samples >= xenos::MsaaSamples::k4X) {
++    if (msaa_experiment_mode_ == 2) {
++      return true;
++    }
++    VkRect2D tiny_scissor = {{dynamic_scissor_.offset.x, dynamic_scissor_.offset.y}, {1, 1}};
++    deferred_command_buffer_.CmdVkSetScissor(0, 1, &tiny_scissor);
++    // Restore the real scissor for the next draw.
++    dynamic_scissor_update_needed_ = true;
++  }
+ 
+   // Draw.
+   if (primitive_processing_result.index_buffer_type ==
+-- 
+2.43.0
+

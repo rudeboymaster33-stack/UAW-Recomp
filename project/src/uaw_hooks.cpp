@@ -5,6 +5,12 @@
 #include <string>
 #include <vector>
 #include <chrono>
+#include <cstdlib>
+#include <thread>
+#include <rex/chrono/clock.h>
+#include <rex/graphics/swap_hints.h>
+#include <rex/system/kernel_state.h>
+#include <rex/system/xmemory.h>
 #include <rex/ui/overlay/debug_overlay.h>
 
 namespace {
@@ -21,9 +27,210 @@ uint64_t g_log_window_frames = 0;
 void UawProfilerSecond(double fps);
 void UawFrameSyncCounters();
 
+// Frame pacing: the game runs at most one world update per drawn frame, and only
+// when >= 1/30 s has passed since the previous update (no catch-up). Drawing
+// faster shows updates for an uneven number of frames (judder); pacing at exactly
+// 33.3 ms makes updates miss whenever the game's clock reads a hair short. So
+// frames are paced slightly wider than 1/30 s, which gives exactly one update
+// per frame. UAW_FRAME_US sets the interval in microseconds (0 = off); default
+// 34000 on Android, off on PC.
+extern std::atomic<uint32_t> g_fsync_ptr;
+// The game's update clock is KeTimeStampBundle.TickCount minus a start offset;
+// learned in UawHook_TickCarry (absolute tick count - the game's "now").
+std::atomic<uint32_t> g_game_time_base{0};
+std::atomic<bool> g_game_time_base_known{false};
+uint32_t g_pace_held = 0;
+namespace {
+uint32_t g_fsync_ptr_early() { return g_fsync_ptr.load(std::memory_order_relaxed); }
+int64_t g_frame_us_override = -1;  // set by the A/B diagnostic
+int64_t FrameIntervalUs() {
+  if (g_frame_us_override >= 0) return g_frame_us_override;
+  static int64_t us = [] {
+    const char* env = std::getenv("UAW_FRAME_US");
+    if (env && *env) return int64_t(std::atoll(env));
+#if defined(__ANDROID__)
+    return int64_t(33333);
+#else
+    return int64_t(0);
+#endif
+  }();
+  return us;
+}
+int64_t g_next_present_us = 0;
+// The game reads time from KeTimeStampBundle.TickCount (ms), which a 1 ms host
+// timer refreshes; on Android that timer can lag a few ms, so the game sometimes
+// sees < 33 ms between frames and skips its world update. Refresh the value
+// right at the swap so the game's per-frame time steps are exact.
+void RefreshGuestTickCount() {
+  auto mem = REX_KERNEL_MEMORY();
+  // 0x82000698: the game's import slot holding the KeTimeStampBundle address.
+  auto slot = mem->TranslateVirtual<uint8_t*>(0x82000698);
+  uint32_t bundle = (uint32_t(slot[0]) << 24) | (uint32_t(slot[1]) << 16) |
+                    (uint32_t(slot[2]) << 8) | slot[3];
+  if (!bundle) return;
+  uint32_t ms = uint32_t(rex::chrono::Clock::QueryGuestUptimeMillis());
+  auto p = mem->TranslateVirtual<uint8_t*>(bundle + 16);
+  p[0] = uint8_t(ms >> 24); p[1] = uint8_t(ms >> 16); p[2] = uint8_t(ms >> 8); p[3] = uint8_t(ms);
+}
+
+// Skirmish runs as a lockstep network match: a world update waits for every
+// player's turn confirmation, and after a late one the game catches up by
+// updating every 25-28 ms. So only frames that contain a world update are
+// paced (evenly, one per interval); frames without one go out immediately,
+// letting the game catch up. g_pace_mode: 0 = off, 1 = update-aware, 2 = every
+// frame (fixed). Diagnostic env UAW_FPS_CAP_AB=1 cycles off / update-aware /
+// fixed every 20 s.
+int g_pace_mode = 3;
+uint32_t g_pace_tick_seen = 0;
+uint32_t ReadLogicTick() {
+  uint32_t ptr = g_fsync_ptr_early();
+  if (!ptr) return 0;
+  auto p = REX_KERNEL_MEMORY()->TranslateVirtual<uint8_t*>(ptr);
+  return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3];
+}
+// Mode 3: hold each frame until the game's next world update is due (from
+// its own FrameSynchronizer: last update time +80, TargetFPS +24), so the
+// next frame starts exactly on the update beat and its camera position is
+// sampled at an even time. When the game is behind (update already due), no
+// waiting at all, so the lockstep network match can catch up.
+bool PaceToNextUpdate() {
+  uint32_t ptr = g_fsync_ptr_early();
+  if (!ptr) return false;
+  auto obj = REX_KERNEL_MEMORY()->TranslateVirtual<uint8_t*>(ptr);
+  auto rd = [&](int off) {
+    return (uint32_t(obj[off]) << 24) | (uint32_t(obj[off + 1]) << 16) |
+           (uint32_t(obj[off + 2]) << 8) | obj[off + 3];
+  };
+  uint32_t last = rd(80);
+  int32_t target = int32_t(rd(24));
+  if (!last || target <= 0 || target > 240) return false;
+  if (!g_game_time_base_known.load(std::memory_order_relaxed)) return false;
+  // Game-relative due time -> absolute guest uptime ms.
+  uint32_t due_ms = last + 1000u / uint32_t(target) + g_game_time_base.load(std::memory_order_relaxed);
+  // Guest ms clock = Clock::QueryGuestUptimeMillis (what we write into
+  // KeTimeStampBundle.TickCount at every swap).
+  int64_t now_ms = int64_t(rex::chrono::Clock::QueryGuestUptimeMillis());
+  int64_t wait_ms = int64_t(int32_t(due_ms - uint32_t(now_ms)));
+  if (wait_ms <= 0 || wait_ms > 40) return true;  // due already (or odd): go now
+  ++g_pace_held;
+  int64_t until = NowUs() + wait_ms * 1000;
+  if (wait_ms > 2) {
+    std::this_thread::sleep_for(std::chrono::microseconds((wait_ms - 2) * 1000));
+  }
+  while (NowUs() < until &&
+         int32_t(due_ms - uint32_t(rex::chrono::Clock::QueryGuestUptimeMillis())) > 0) {
+    std::this_thread::yield();
+  }
+  return true;
+}
+
+void PaceSwap() {
+  static const bool ab = [] {
+    const char* env = std::getenv("UAW_FPS_CAP_AB");
+    return env && *env == '1';
+  }();
+  if (g_pace_mode == 3 && !ab) {
+    PaceToNextUpdate();
+    return;
+  }
+  if (ab) {
+    g_pace_mode = int((NowUs() / 20000000) % 3);
+  }
+  const int64_t interval = FrameIntervalUs();
+  if (g_pace_mode == 0 || interval <= 0 || interval > 100000) {
+    g_next_present_us = 0;
+    return;
+  }
+  if (g_pace_mode == 1) {
+    static bool prev_updated = true;
+    uint32_t tick = ReadLogicTick();
+    bool updated = tick != g_pace_tick_seen;
+    g_pace_tick_seen = tick;
+    bool after_gap = !prev_updated;
+    prev_updated = updated;
+    if (!updated) {
+      return;  // No world update in this frame: don't hold it back.
+    }
+    if (after_gap) {
+      // First update after a wait: show it now and restart the cadence.
+      g_next_present_us = NowUs() + interval;
+      return;
+    }
+  }
+  int64_t now = NowUs();
+  if (g_next_present_us == 0 || now - g_next_present_us > interval) {
+    // First frame, or running late by more than a frame: restart the cadence.
+    g_next_present_us = now + interval;
+    return;
+  }
+  if (now < g_next_present_us) {
+    // Sleep most of the wait, then spin briefly for accuracy.
+    int64_t wait = g_next_present_us - now;
+    if (wait > 2000) {
+      std::this_thread::sleep_for(std::chrono::microseconds(wait - 1500));
+    }
+    while (NowUs() < g_next_present_us) {
+      std::this_thread::yield();
+    }
+  }
+  g_next_present_us += interval;
+}
+}  // namespace
+
+// Per-frame pacing stats, logged once a second as [uaw-pace]: how many logic
+// ticks the game ran for each presented frame, and the frame interval spread.
+extern std::atomic<uint32_t> g_fsync_ptr;
+uint32_t g_pace_ticks_hist[4] = {};  // 0, 1, 2, 3+ logic ticks per frame
+uint32_t g_pace_int_hist[5] = {};    // <25, 25-31, 31-36, 36-45, >45 ms
+uint32_t g_pace_last_tick = 0;
+int64_t g_pace_last_swap = 0;
+void PaceStatsFrame(int64_t now);
+void PaceStatsLog();
+
+// Show only frames with a new world update: the game draws ~45-50 frames a
+// second but the world updates 30 times, so the extra frames repeat the last
+// state and make motion uneven. Repeats are still drawn (the game needs them)
+// but not displayed. A frame is always shown if nothing was shown for 34 ms
+// (menus, pauses). Env UAW_SKIP_REPEATS=0 disables; default on for Android.
+// Diagnostic env UAW_SKIP_AB=1: on for 20 s, off for 20 s.
+namespace {
+bool g_skip_repeats_active = false;
+uint32_t g_shown_tick = 0;
+int64_t g_last_shown_us = 0;
+uint32_t g_frames_shown = 0;
+bool DecideShowFrame(int64_t now) {
+  static const bool enabled = [] {
+    const char* env = std::getenv("UAW_SKIP_REPEATS");
+    if (env && *env) return *env != '0';
+#if defined(__ANDROID__)
+    return true;
+#else
+    return false;
+#endif
+  }();
+  static const bool ab = [] {
+    const char* env = std::getenv("UAW_SKIP_AB");
+    return env && *env == '1';
+  }();
+  g_skip_repeats_active = enabled && (!ab || ((now / 20000000) & 1) == 0);
+  uint32_t tick = ReadLogicTick();
+  bool show = !g_skip_repeats_active || tick != g_shown_tick || now - g_last_shown_us >= 34000;
+  if (show) {
+    g_shown_tick = tick;
+    g_last_shown_us = now;
+    ++g_frames_shown;
+  }
+  return show;
+}
+}  // namespace
+
 // Called right before the game's VdSwap (0x828C0054): one call per presented guest frame.
 void UawHook_Swap() {
+  PaceSwap();
+  RefreshGuestTickCount();
+  rex::graphics::swap_hints::PushGuestSwap(DecideShowFrame(NowUs()));
   int64_t now = NowUs();
+  PaceStatsFrame(now);
   uint64_t n = ++g_swaps;
   g_last_swap_us.store(now, std::memory_order_relaxed);
   if (g_log_window_start == 0) g_log_window_start = now;
@@ -34,6 +241,7 @@ void UawHook_Swap() {
     REXLOG_INFO("[uaw-fps] {:.1f} fps (frame {})", fps, n);
     UawProfilerSecond(fps);
     UawFrameSyncCounters();
+    PaceStatsLog();
     g_log_window_start = now;
     g_log_window_frames = 0;
   }
@@ -576,3 +784,89 @@ void UawProfilerSecond(double fps) {
 #else
 void UawProfilerSecond(double) {}
 #endif
+
+void PaceStatsFrame(int64_t now) {
+  uint32_t ptr = g_fsync_ptr.load(std::memory_order_relaxed);
+  if (ptr) {
+    auto p = REX_KERNEL_MEMORY()->TranslateVirtual<uint8_t*>(ptr);
+    uint32_t tick = (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3];
+    if (g_pace_last_tick) {
+      uint32_t d = tick - g_pace_last_tick;
+      ++g_pace_ticks_hist[d > 3 ? 3 : d];
+    }
+    g_pace_last_tick = tick;
+  }
+  if (g_pace_last_swap) {
+    int64_t ms10 = (now - g_pace_last_swap) / 100;  // tenths of a ms
+    int b = ms10 < 250 ? 0 : ms10 < 310 ? 1 : ms10 < 360 ? 2 : ms10 < 450 ? 3 : 4;
+    ++g_pace_int_hist[b];
+  }
+  g_pace_last_swap = now;
+}
+
+void PaceStatsLog() {
+  extern std::atomic<uint64_t> g_tick_carry_count;
+  REXLOG_INFO("[uaw-pace] held={} shown={} skip_repeats={} carried={} mode={} ticks/frame 0:{} 1:{} 2:{} 3+:{} | interval <25ms:{} 25-31:{} 31-36:{} 36-45:{} >45:{}",
+              g_pace_held, g_frames_shown, g_skip_repeats_active ? 1 : 0, g_tick_carry_count.exchange(0), g_pace_mode, g_pace_ticks_hist[0], g_pace_ticks_hist[1], g_pace_ticks_hist[2], g_pace_ticks_hist[3],
+              g_pace_int_hist[0], g_pace_int_hist[1], g_pace_int_hist[2], g_pace_int_hist[3],
+              g_pace_int_hist[4]);
+  g_frames_shown = 0;
+  g_pace_held = 0;
+  for (auto& v : g_pace_ticks_hist) v = 0;
+  for (auto& v : g_pace_int_hist) v = 0;
+}
+
+// ---- Game-speed fix: keep leftover time between world updates ----
+// At 0x8225C6A4 the game is about to store "last update time = now" (r19) into
+// FrameSynchronizer+80. Replace now with last + interval (never later than
+// now), so time past the 33 ms threshold carries over instead of being lost.
+// Set env UAW_TICK_CARRY=0 to disable.
+std::atomic<uint64_t> g_tick_carry_count{0};
+void UawHook_TickCarry(PPCRegister& r19, PPCRegister& r27) {
+  static const bool enabled = [] {
+    const char* env = std::getenv("UAW_TICK_CARRY");
+    return !(env && *env == '0');
+  }();
+  if (!enabled) return;
+  auto mem = REX_KERNEL_MEMORY();
+  auto obj = mem->TranslateVirtual<uint8_t*>(r27.u32);
+  auto rd = [&](int off) {
+    return (uint32_t(obj[off]) << 24) | (uint32_t(obj[off + 1]) << 16) |
+           (uint32_t(obj[off + 2]) << 8) | obj[off + 3];
+  };
+  uint32_t last = rd(80);
+  int32_t target = int32_t(rd(24));
+  uint32_t now = r19.u32;
+  if (!last || target <= 0 || target > 240) return;
+  {
+    // Learn the game's time offset: the absolute tick count (which we keep
+    // equal to the guest uptime at every swap) minus the game's "now".
+    uint32_t abs_ms = uint32_t(rex::chrono::Clock::QueryGuestUptimeMillis());
+    uint32_t base = abs_ms - now;
+    uint32_t old_base = g_game_time_base.load(std::memory_order_relaxed);
+    // The tick count can lag the uptime by a few ms; keep the smallest base
+    // seen recently (closest to exact), refreshing if it drifts a lot.
+    if (!g_game_time_base_known.load(std::memory_order_relaxed) ||
+        int32_t(base - old_base) < 0 || int32_t(base - old_base) > 50) {
+      g_game_time_base.store(base, std::memory_order_relaxed);
+      g_game_time_base_known.store(true, std::memory_order_relaxed);
+    }
+  }
+  uint32_t interval = 1000u / uint32_t(target);
+  uint32_t elapsed = now - last;
+  // Only carry over small amounts; after a long pause (loading, alt-tab) resync.
+  if (elapsed >= interval && elapsed < interval * 2) {
+    // 1000 / target is rounded down (33 for 30 fps); spread the remainder so
+    // the average is exact (33, 33, 34 ms for 30 fps).
+    static uint32_t remainder_acc = 0;
+    uint32_t step = interval;
+    remainder_acc += 1000u % uint32_t(target);
+    if (remainder_acc >= uint32_t(target)) {
+      remainder_acc -= uint32_t(target);
+      ++step;
+    }
+    if (step > elapsed) step = elapsed;
+    r19.u32 = last + step;  // <= now, so the game can never run ahead
+    g_tick_carry_count.fetch_add(1, std::memory_order_relaxed);
+  }
+}
