@@ -1,6 +1,7 @@
 @echo off
+for %%I in ("%~dp0..\..") do set "ROOT=%%~fI\"
 REM Android step 4: copy the game log and Android system log from the phone for Claude.
-set "ROOT=%~dp0"
+
 set "ADB=%ROOT%android-tools\sdk\platform-tools\adb.exe"
 set "PKGDIR=/sdcard/Android/data/com.uaw.recomp/files"
 "%ADB%" pull %PKGDIR%/uaw.log "%ROOT%logs\android_uaw.log" > "%ROOT%logs\23_logs.log" 2>&1

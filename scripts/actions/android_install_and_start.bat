@@ -1,7 +1,8 @@
 @echo off
+for %%I in ("%~dp0..\..") do set "ROOT=%%~fI\"
 REM Android step 3: install the app on the phone over USB, copy the game files (first time only), start it.
 REM Needs: phone plugged in with USB debugging on (accept the "Allow USB debugging?" prompt on the phone).
-set "ROOT=%~dp0"
+
 set "ADB=%ROOT%android-tools\sdk\platform-tools\adb.exe"
 set "GAME=C:\ROMS\Xbox 360\Universe at War - Earth Assault (USA)\Universe at War - Earth Assault (USA)"
 set "PKGDIR=/sdcard/Android/data/com.uaw.recomp/files"
@@ -13,7 +14,7 @@ echo ==== %DATE% %TIME% > "%LOG%"
 if errorlevel 1 (
   echo.
   echo Phone not found. Check: USB cable plugged in, USB debugging on,
-  echo and tap "Allow" on the phone's "Allow USB debugging?" prompt. Then run this again.
+  echo and tap "Allow" on the phone's "Allow USB debugging?" prompt. Then try again.
   echo NO DEVICE >> "%LOG%"
   pause & exit /b 1
 )
@@ -47,5 +48,5 @@ echo Starting the game on the phone...
 echo ==== DONE >> "%LOG%"
 echo.
 echo The game should now be opening on your phone.
-echo When you're done (or if it closes/crashes), run "Android 4 - Get Retroid logs" so Claude can read what happened.
+echo When you're done (or if it closes/crashes), choose "Get Retroid logs" in the Start here menu so Claude can read what happened.
 pause

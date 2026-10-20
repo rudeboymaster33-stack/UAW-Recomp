@@ -1,7 +1,8 @@
 @echo off
+for %%I in ("%~dp0..\..") do set "ROOT=%%~fI\"
 REM Android step 1: install Java 17, Android SDK command-line tools, platform, build-tools and NDK.
 REM You will be asked to accept the Android SDK licenses - read them and type y to accept.
-set "ROOT=%~dp0"
+
 set "AT=%ROOT%android-tools"
 set "LOG=%ROOT%logs\20_android_tools.log"
 if not exist "%AT%" mkdir "%AT%"

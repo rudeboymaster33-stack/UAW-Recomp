@@ -1,7 +1,8 @@
 @echo off
+for %%I in ("%~dp0..\..") do set "ROOT=%%~fI\"
 REM ONE-CLICK TEST: rebuild the Android app, install it on the Retroid, start the game with the
 REM profiler, wait while you play, then copy the logs back for Claude.
-set "ROOT=%~dp0"
+
 set "ADB=%ROOT%android-tools\sdk\platform-tools\adb.exe"
 set "PKGDIR=/sdcard/Android/data/com.uaw.recomp/files"
 echo [1/4] Building the Android app... (log: logs\21_android_build.log)

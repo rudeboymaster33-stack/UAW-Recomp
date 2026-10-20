@@ -81,7 +81,7 @@ if errorlevel 1 goto :fail
 "%BT%\zipalign.exe" -f -p 4 unaligned.apk aligned.apk
 if errorlevel 1 goto :fail
 if not exist "%AT%\debug.keystore" keytool -genkeypair -keystore "%AT%\debug.keystore" -storepass android -keypass android -alias uaw -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=UAW Recomp"
-java -jar "%BT%\lib\apksigner.jar" sign --ks "%AT%\debug.keystore" --ks-pass pass:android --key-pass pass:android --out "%ROOT%UniverseAtWar.apk" aligned.apk
+java -jar "%BT%\lib\apksigner.jar" sign --v4-signing-enabled false --ks "%AT%\debug.keystore" --ks-pass pass:android --key-pass pass:android --out "%ROOT%UniverseAtWar.apk" aligned.apk
 if errorlevel 1 goto :fail
 echo ==== SUCCESS
 exit /b 0
