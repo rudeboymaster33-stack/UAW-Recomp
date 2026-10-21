@@ -1,0 +1,504 @@
+From 88a5f40cc7381edfa1af9a4ebcb1795e85c40cd7 Mon Sep 17 00:00:00 2001
+From: UAW Recomp <noreply@anthropic.com>
+Date: Sun, 18 Oct 2026 18:56:00 -0400
+Subject: [PATCH] vulkan: hoist mid-pass shared memory uploads to before the
+ render pass
+
+Uploads of guest memory that no draw in the open pass has read are recorded
+at a hoist point placed before the pass begin, instead of ending the pass.
+Avoids most render pass splits (expensive MSAA load/store on tile GPUs).
+Cvar vulkan_hoist_shared_memory_uploads (default on).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ include/rex/graphics/shared_memory.h          |   4 +
+ .../rex/graphics/vulkan/command_processor.h   |  10 ++
+ .../graphics/vulkan/deferred_command_buffer.h |  36 ++++++
+ include/rex/graphics/vulkan/shared_memory.h   |  23 ++++
+ src/graphics/shared_memory.cpp                |   5 +-
+ src/graphics/vulkan/command_processor.cpp     |  15 +++
+ .../vulkan/deferred_command_buffer.cpp        |  44 +++++++
+ src/graphics/vulkan/gpu_frame_stats.h         |   2 +
+ src/graphics/vulkan/shared_memory.cpp         | 119 +++++++++++++++---
+ 9 files changed, 243 insertions(+), 15 deletions(-)
+
+diff --git a/include/rex/graphics/shared_memory.h b/include/rex/graphics/shared_memory.h
+index 4d85a2b..8ad06d6 100644
+--- a/include/rex/graphics/shared_memory.h
++++ b/include/rex/graphics/shared_memory.h
+@@ -140,6 +140,10 @@ class SharedMemory {
+   virtual bool UploadRanges(
+       const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) = 0;
+ 
++  // Called at the end of every RequestRanges (after any upload) with the
++  // merged byte ranges that were requested.
++  virtual void OnRangesRequested(const std::vector<std::pair<uint32_t, uint32_t>>& ranges) {}
++
+  private:
+   memory::Memory& memory_;
+ 
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+index af92981..3eb95c9 100644
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -203,6 +203,14 @@ class VulkanCommandProcessor : public CommandProcessor {
+   // including adding pipeline barriers that are not a part of the render pass
+   // scope. Submission must be open.
+   void EndRenderPass();
++  // If a guest draw render pass is open with a hoist point, returns its index.
++  bool GetDrawPassHoistPoint(uint32_t& index) const {
++    if (!hoist_point_valid_ || !in_render_pass_) {
++      return false;
++    }
++    index = hoist_point_index_;
++    return true;
++  }
+ 
+   VkDescriptorSetLayout GetSingleTransientDescriptorLayout(
+       SingleTransientDescriptorLayout transient_descriptor_layout) const {
+@@ -801,6 +809,8 @@ class VulkanCommandProcessor : public CommandProcessor {
+   // A guest occlusion query is open (tracked only while host queries are off,
+   // in which case its result is faked and its invisible draws can be skipped).
+   bool guest_zpd_query_open_ = false;
++  bool hoist_point_valid_ = false;
++  uint32_t hoist_point_index_ = 0;
+   size_t pass_begin_args_offset_ = 0;
+   VkExtent2D pass_full_extent_ = {};
+   int32_t pass_area_x0_ = 0, pass_area_y0_ = 0, pass_area_x1_ = 0, pass_area_y1_ = 0;
+diff --git a/include/rex/graphics/vulkan/deferred_command_buffer.h b/include/rex/graphics/vulkan/deferred_command_buffer.h
+index 751199e..2016663 100644
+--- a/include/rex/graphics/vulkan/deferred_command_buffer.h
++++ b/include/rex/graphics/vulkan/deferred_command_buffer.h
+@@ -270,6 +270,28 @@ class DeferredCommandBuffer {
+   size_t GetLastCommandArgumentsOffset() const { return last_arguments_offset_; }
+   void PatchBeginRenderingRenderArea(size_t arguments_offset, const VkRect2D& render_area);
+ 
++  // Hoist points: a placeholder recorded before a render pass begins. Buffer
++  // copies requested later (while the pass is open) can be attached to it and
++  // are replayed at the placeholder, before the pass, wrapped in barriers.
++  uint32_t CmdHoistPoint() {
++    uint32_t index = uint32_t(hoist_batches_.size());
++    hoist_batches_.emplace_back();
++    auto& args = *reinterpret_cast<ArgsHoistPoint*>(
++        WriteCommand(Command::kHoistPoint, sizeof(ArgsHoistPoint)));
++    args.index = index;
++    return index;
++  }
++  void AddHoistedBufferCopies(uint32_t hoist_index, VkBuffer src_buffer, VkBuffer dst_buffer,
++                              const VkBufferCopy* regions, uint32_t region_count) {
++    if (hoist_index >= hoist_batches_.size()) {
++      return;
++    }
++    HoistBatch& batch = hoist_batches_[hoist_index];
++    for (uint32_t i = 0; i < region_count; ++i) {
++      batch.copies.push_back({src_buffer, dst_buffer, regions[i]});
++    }
++  }
++
+   void CmdVkWriteTimestamp(VkPipelineStageFlagBits stage, VkQueryPool query_pool, uint32_t query) {
+     auto& args = *reinterpret_cast<ArgsVkWriteTimestamp*>(
+         WriteCommand(Command::kVkWriteTimestamp, sizeof(ArgsVkWriteTimestamp)));
+@@ -366,6 +388,7 @@ class DeferredCommandBuffer {
+ 
+  private:
+   enum class Command {
++    kHoistPoint,
+     kVkWriteTimestamp,
+     kVkBeginRenderPass,
+     kVkBeginQuery,
+@@ -604,6 +627,19 @@ class DeferredCommandBuffer {
+   // uintmax_t to ensure uint64_t and pointer alignment of all structures.
+   std::vector<uintmax_t> command_stream_;
+   size_t last_arguments_offset_ = 0;
++
++  struct ArgsHoistPoint {
++    uint32_t index;
++  };
++  struct HoistedCopy {
++    VkBuffer src;
++    VkBuffer dst;
++    VkBufferCopy region;
++  };
++  struct HoistBatch {
++    std::vector<HoistedCopy> copies;
++  };
++  std::vector<HoistBatch> hoist_batches_;
+ };
+ 
+ }  // namespace rex::graphics::vulkan
+diff --git a/include/rex/graphics/vulkan/shared_memory.h b/include/rex/graphics/vulkan/shared_memory.h
+index 104bdad..2c6c402 100644
+--- a/include/rex/graphics/vulkan/shared_memory.h
++++ b/include/rex/graphics/vulkan/shared_memory.h
+@@ -49,11 +49,24 @@ class VulkanSharedMemory : public SharedMemory {
+ 
+   VkBuffer buffer() const { return buffer_; }
+ 
++  // Upload hoisting: while a guest draw render pass is open, uploads of pages
++  // that no draw in that pass has read so far are moved to before the pass
++  // instead of ending it (ending passes is very expensive on tile-based GPUs).
++  // Reads are first collected for the draw being prepared, and committed to
++  // the pass scope when that draw is recorded into the pass.
++  void BeginHoistScope() {
++    scope_reads_.clear();
++    scope_saturated_ = false;
++  }
++  void NoteDrawRead(uint32_t start, uint32_t length);
++  void CommitDrawReads();
++
+  protected:
+   bool AllocateSparseHostGpuMemoryRange(uint32_t offset_allocations,
+                                         uint32_t length_allocations) override;
+ 
+   bool UploadRanges(const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) override;
++  void OnRangesRequested(const std::vector<std::pair<uint32_t, uint32_t>>& ranges) override;
+ 
+  private:
+   void GetUsageMasks(Usage usage, VkPipelineStageFlags& stage_mask,
+@@ -72,6 +85,16 @@ class VulkanSharedMemory : public SharedMemory {
+ 
+   std::unique_ptr<ui::vulkan::VulkanUploadBufferPool> upload_buffer_pool_;
+   std::vector<VkBufferCopy> upload_regions_;
++
++  // Byte ranges [start, end) read by draws since the current hoist point.
++  std::vector<std::pair<uint32_t, uint32_t>> scope_reads_;
++  bool scope_saturated_ = false;
++  std::vector<std::pair<uint32_t, uint32_t>> draw_reads_;
++  bool draw_reads_saturated_ = false;
++  static void AddReadRange(std::vector<std::pair<uint32_t, uint32_t>>& list, bool& saturated,
++                           uint32_t start, uint32_t end);
++  bool ScopeReadsOverlap(
++      const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) const;
+ };
+ 
+ }  // namespace rex::graphics::vulkan
+diff --git a/src/graphics/shared_memory.cpp b/src/graphics/shared_memory.cpp
+index ec0df7c..1b036f1 100644
+--- a/src/graphics/shared_memory.cpp
++++ b/src/graphics/shared_memory.cpp
+@@ -462,10 +462,13 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
+                     uint32_t(upload_ranges_.size()));
+ 
+   if (upload_ranges_.empty()) {
++    OnRangesRequested(merged_ranges);
+     return true;
+   }
+ 
+-  return UploadRanges(upload_ranges_);
++  bool upload_result = UploadRanges(upload_ranges_);
++  OnRangesRequested(merged_ranges);
++  return upload_result;
+ }
+ 
+ bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index b95472f..da51b09 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -2349,6 +2349,8 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+           "shm_uploads={:.1f} shm_upload={:.0f}KB tight_area={:.2f}MPix extents(per frame):{}",
+           st.pass_breaks / f, st.buffer_barriers / f, st.image_barriers / f, st.shm_uploads / f,
+           st.shm_upload_kb / f, st.tight_area_kpix / f / 1000.0, extents);
++      REXGPU_INFO("[gpu-hoist] per frame: uploads_moved_before_pass={:.1f} uploads_kept={:.1f}",
++                  st.shm_hoisted / f, st.shm_hoist_blocked / f);
+       REXGPU_INFO(
+           "[gpu-query] per frame: queries={:.1f} draws_in_queries={:.1f} skipped={:.1f} "
+           "kept_zwrite={:.1f} kept_color={:.1f} kept_other={:.1f}",
+@@ -3223,6 +3225,9 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+   GpuTsMark(kGpuSegDrawPass |
+             GpuTsExtentTag(framebuffer->host_extent,
+                            render_target_cache_->last_update_render_pass_key().key));
++  hoist_point_index_ = deferred_command_buffer_.CmdHoistPoint();
++  hoist_point_valid_ = true;
++  shared_memory_->BeginHoistScope();
+   if (pass_trace_active_) {
+     VulkanRenderTargetCache::RenderPassKey trace_key =
+         render_target_cache_->last_update_render_pass_key();
+@@ -3332,6 +3337,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+   current_render_pass_ = use_dynamic_rendering ? VK_NULL_HANDLE : render_pass;
+   current_framebuffer_ = framebuffer;
+   gpu_ts_cur_slot_ = 0;
++  hoist_point_valid_ = false;
+   GpuTsMark(kGpuSegTransferPass);
+   PassTraceAppend(transfer_dest_is_depth ? " XFER-D" : " XFER-C");
+ 
+@@ -3725,6 +3731,7 @@ void VulkanCommandProcessor::EndRenderPass() {
+   current_framebuffer_ = nullptr;
+   in_render_pass_ = false;
+   gpu_ts_cur_slot_ = 0;
++  hoist_point_valid_ = false;
+   GpuTsMark(kGpuSegOutside);
+ }
+ 
+@@ -4493,6 +4500,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+       VertexBufferState& state = vertex_buffer_states_[vfetch_index];
+       if (state.address == vfetch_constant.address && state.size == vfetch_constant.size) {
+         vertex_buffers_in_sync_[vfetch_index >> 6] |= vfetch_bit;
++        shared_memory_->NoteDrawRead(vfetch_constant.address << 2, vfetch_constant.size << 2);
+         continue;
+       }
+       if (!shared_memory_->RequestRange(vfetch_constant.address << 2, vfetch_constant.size << 2)) {
+@@ -4524,6 +4532,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+     memexport_extent_end =
+         std::max(memexport_extent_end, memexport_range_base_bytes + memexport_range.size_bytes);
+   }
++  if (memexport_writes_possible) {
++    // Draws that may write guest memory: never move uploads across them.
++    shared_memory_->NoteDrawRead(0, SharedMemory::kBufferSize);
++  }
+   if (memexport_writes_possible && memexport_ranges_.empty()) {
+     if (!shared_memory_->RequestRange(0, SharedMemory::kBufferSize)) {
+       REXGPU_ERROR(
+@@ -4596,6 +4608,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+       render_target_cache_->last_update_render_pass(),
+       render_target_cache_->last_update_framebuffer());
+   NotePassDrawScissor(dynamic_scissor_);
++  // This draw's guest memory reads now belong to the open pass.
++  shared_memory_->CommitDrawReads();
+   if (gpu_ts_cur_slot_) {
+     ++gpu_ts_slot_draws_[gpu_ts_cur_slot_ - 1];
+   }
+@@ -5648,6 +5662,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+     current_render_pass_ = VK_NULL_HANDLE;
+     current_framebuffer_ = nullptr;
+     in_render_pass_ = false;
++    hoist_point_valid_ = false;
+     current_guest_graphics_pipeline_ = VK_NULL_HANDLE;
+     current_external_graphics_pipeline_ = VK_NULL_HANDLE;
+     current_external_compute_pipeline_ = VK_NULL_HANDLE;
+diff --git a/src/graphics/vulkan/deferred_command_buffer.cpp b/src/graphics/vulkan/deferred_command_buffer.cpp
+index 423eb21..9d92c48 100644
+--- a/src/graphics/vulkan/deferred_command_buffer.cpp
++++ b/src/graphics/vulkan/deferred_command_buffer.cpp
+@@ -30,6 +30,7 @@ DeferredCommandBuffer::DeferredCommandBuffer(const VulkanCommandProcessor& comma
+ 
+ void DeferredCommandBuffer::Reset() {
+   command_stream_.clear();
++  hoist_batches_.clear();
+ }
+ 
+ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
+@@ -266,6 +267,49 @@ void DeferredCommandBuffer::Execute(VkCommandBuffer command_buffer) {
+             reinterpret_cast<const uint8_t*>(stream) + sizeof(ArgsVkPushConstants));
+       } break;
+ 
++      case Command::kHoistPoint: {
++        auto& args = *reinterpret_cast<const ArgsHoistPoint*>(stream);
++        if (args.index < hoist_batches_.size() && !hoist_batches_[args.index].copies.empty()) {
++          const HoistBatch& batch = hoist_batches_[args.index];
++          // Earlier reads and writes of the destination must be done before
++          // the copies overwrite it.
++          VkMemoryBarrier before;
++          before.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
++          before.pNext = nullptr;
++          before.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
++          before.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++          dfn.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
++                                   VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, nullptr, 0,
++                                   nullptr);
++          size_t i = 0;
++          while (i < batch.copies.size()) {
++            size_t j = i;
++            VkBufferCopy regions[64];
++            uint32_t region_count = 0;
++            while (j < batch.copies.size() && region_count < 64 &&
++                   batch.copies[j].src == batch.copies[i].src &&
++                   batch.copies[j].dst == batch.copies[i].dst) {
++              regions[region_count++] = batch.copies[j].region;
++              ++j;
++            }
++            dfn.vkCmdCopyBuffer(command_buffer, batch.copies[i].src, batch.copies[i].dst,
++                                region_count, regions);
++            i = j;
++          }
++          VkMemoryBarrier after;
++          after.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
++          after.pNext = nullptr;
++          after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
++          after.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_SHADER_READ_BIT |
++                                VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT |
++                                VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
++                                VK_ACCESS_TRANSFER_WRITE_BIT;
++          dfn.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                                   VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &after, 0, nullptr,
++                                   0, nullptr);
++        }
++      } break;
++
+       case Command::kVkWriteTimestamp: {
+         auto& args = *reinterpret_cast<const ArgsVkWriteTimestamp*>(stream);
+         dfn.vkCmdWriteTimestamp(command_buffer, args.stage, args.query_pool, args.query);
+diff --git a/src/graphics/vulkan/gpu_frame_stats.h b/src/graphics/vulkan/gpu_frame_stats.h
+index 0071ca8..1c4b10c 100644
+--- a/src/graphics/vulkan/gpu_frame_stats.h
++++ b/src/graphics/vulkan/gpu_frame_stats.h
+@@ -22,6 +22,8 @@ struct GpuFrameStats {
+   uint64_t image_barriers = 0;
+   uint64_t shm_uploads = 0;      // shared memory upload calls that copied data
+   uint64_t shm_upload_kb = 0;
++  uint64_t shm_hoisted = 0;        // uploads moved to before the render pass
++  uint64_t shm_hoist_blocked = 0;  // uploads in a draw pass that could not be moved
+   uint64_t queries = 0;              // guest occlusion queries begun
+   uint64_t query_draws = 0;          // draws issued while a guest query was open
+   uint64_t query_draws_skipped = 0;  // of those, skipped (no visible effect)
+diff --git a/src/graphics/vulkan/shared_memory.cpp b/src/graphics/vulkan/shared_memory.cpp
+index 8639afd..87dd99e 100644
+--- a/src/graphics/vulkan/shared_memory.cpp
++++ b/src/graphics/vulkan/shared_memory.cpp
+@@ -29,6 +29,11 @@ REXCVAR_DEFINE_BOOL(vulkan_sparse_shared_memory, true, "GPU/Vulkan",
+ 
+ #include "gpu_frame_stats.h"
+ 
++REXCVAR_DEFINE_BOOL(vulkan_hoist_shared_memory_uploads, true, "GPU",
++                    "Move guest memory uploads that happen in the middle of a render pass to "
++                    "before the pass when no earlier draw in the pass read that memory "
++                    "(avoids costly render pass splits on tile-based mobile GPUs)");
++
+ namespace rex::graphics::vulkan {
+ 
+ VulkanSharedMemory::VulkanSharedMemory(VulkanCommandProcessor& command_processor,
+@@ -270,20 +275,110 @@ bool VulkanSharedMemory::AllocateSparseHostGpuMemoryRange(uint32_t offset_alloca
+   return true;
+ }
+ 
++void VulkanSharedMemory::AddReadRange(std::vector<std::pair<uint32_t, uint32_t>>& list,
++                                      bool& saturated, uint32_t start, uint32_t end) {
++  if (saturated || end <= start) {
++    return;
++  }
++  if (!list.empty()) {
++    // Extend the last range if contiguous / overlapping (common for vertex
++    // data in ring buffers).
++    std::pair<uint32_t, uint32_t>& last = list.back();
++    if (start <= last.second && end >= last.first) {
++      last.first = std::min(last.first, start);
++      last.second = std::max(last.second, end);
++      return;
++    }
++  }
++  if (list.size() >= 1024) {
++    saturated = true;
++    return;
++  }
++  list.emplace_back(start, end);
++}
++
++void VulkanSharedMemory::NoteDrawRead(uint32_t start, uint32_t length) {
++  if (!length) {
++    return;
++  }
++  start = std::min(start, kBufferSize);
++  uint32_t end = start + std::min(length, kBufferSize - start);
++  AddReadRange(draw_reads_, draw_reads_saturated_, start, end);
++}
++
++void VulkanSharedMemory::CommitDrawReads() {
++  if (draw_reads_saturated_) {
++    scope_saturated_ = true;
++  }
++  for (const std::pair<uint32_t, uint32_t>& range : draw_reads_) {
++    AddReadRange(scope_reads_, scope_saturated_, range.first, range.second);
++  }
++  draw_reads_.clear();
++  draw_reads_saturated_ = false;
++}
++
++void VulkanSharedMemory::OnRangesRequested(
++    const std::vector<std::pair<uint32_t, uint32_t>>& ranges) {
++  for (const std::pair<uint32_t, uint32_t>& range : ranges) {
++    NoteDrawRead(range.first, range.second);
++  }
++}
++
++bool VulkanSharedMemory::ScopeReadsOverlap(
++    const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) const {
++  if (scope_saturated_) {
++    return true;
++  }
++  for (const std::pair<uint32_t, uint32_t>& pages : upload_page_ranges) {
++    uint64_t up_start = uint64_t(pages.first) << page_size_log2();
++    uint64_t up_end = uint64_t(pages.first + pages.second) << page_size_log2();
++    for (const std::pair<uint32_t, uint32_t>& read : scope_reads_) {
++      if (uint64_t(read.first) < up_end && up_start < uint64_t(read.second)) {
++        return true;
++      }
++    }
++  }
++  return false;
++}
++
+ bool VulkanSharedMemory::UploadRanges(
+     const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) {
+   if (upload_page_ranges.empty()) {
+     return true;
+   }
+-  // upload_page_ranges are sorted, use them to determine the range for the
+-  // ordering barrier.
+-  Use(Usage::kTransferDestination,
+-      std::make_pair(upload_page_ranges.front().first << page_size_log2(),
+-                     (upload_page_ranges.back().first + upload_page_ranges.back().second -
+-                      upload_page_ranges.front().first)
+-                         << page_size_log2()));
+-  command_processor_.SubmitBarriers(true);
++  uint32_t hoist_index = 0;
++  bool in_draw_pass = command_processor_.GetDrawPassHoistPoint(hoist_index);
++  bool hoist = in_draw_pass && REXCVAR_GET(vulkan_hoist_shared_memory_uploads) &&
++               !ScopeReadsOverlap(upload_page_ranges);
++  if (in_draw_pass) {
++    GpuFrameStats& st = GetGpuFrameStats();
++    if (hoist) {
++      ++st.shm_hoisted;
++    } else {
++      ++st.shm_hoist_blocked;
++    }
++  }
++  if (!hoist) {
++    // upload_page_ranges are sorted, use them to determine the range for the
++    // ordering barrier.
++    Use(Usage::kTransferDestination,
++        std::make_pair(upload_page_ranges.front().first << page_size_log2(),
++                       (upload_page_ranges.back().first + upload_page_ranges.back().second -
++                        upload_page_ranges.front().first)
++                           << page_size_log2()));
++    command_processor_.SubmitBarriers(true);
++  }
+   DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
++  auto flush_regions = [&](VkBuffer src) {
++    if (hoist) {
++      command_buffer.AddHoistedBufferCopies(hoist_index, src, buffer_, upload_regions_.data(),
++                                            uint32_t(upload_regions_.size()));
++    } else {
++      command_buffer.CmdVkCopyBuffer(src, buffer_, uint32_t(upload_regions_.size()),
++                                     upload_regions_.data());
++    }
++    upload_regions_.clear();
++  };
+   uint64_t submission_current = command_processor_.GetCurrentSubmission();
+   bool successful = true;
+   upload_regions_.clear();
+@@ -313,9 +408,7 @@ bool VulkanSharedMemory::UploadRanges(
+                   upload_buffer_size);
+       if (upload_buffer_previous != upload_buffer && !upload_regions_.empty()) {
+         assert_true(upload_buffer_previous != VK_NULL_HANDLE);
+-        command_buffer.CmdVkCopyBuffer(upload_buffer_previous, buffer_,
+-                                       uint32_t(upload_regions_.size()), upload_regions_.data());
+-        upload_regions_.clear();
++        flush_regions(upload_buffer_previous);
+       }
+       upload_buffer_previous = upload_buffer;
+       VkBufferCopy& upload_region = upload_regions_.emplace_back();
+@@ -332,9 +425,7 @@ bool VulkanSharedMemory::UploadRanges(
+   }
+   if (!upload_regions_.empty()) {
+     assert_true(upload_buffer_previous != VK_NULL_HANDLE);
+-    command_buffer.CmdVkCopyBuffer(upload_buffer_previous, buffer_,
+-                                   uint32_t(upload_regions_.size()), upload_regions_.data());
+-    upload_regions_.clear();
++    flush_regions(upload_buffer_previous);
+   }
+   return successful;
+ }
+-- 
+2.43.0
+

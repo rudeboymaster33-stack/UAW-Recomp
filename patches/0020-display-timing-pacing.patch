@@ -1,0 +1,175 @@
+From 21708e35d580c35381d5db114735b72e8446d762 Mon Sep 17 00:00:00 2001
+From: UAW Recomp <noreply@anthropic.com>
+Date: Mon, 19 Oct 2026 20:10:44 -0400
+Subject: [PATCH] vulkan presenter: even frame pacing with
+ VK_GOOGLE_display_timing (FIFO)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ include/rex/ui/vulkan/device.h                |  3 +
+ .../device_google_display_timing.inc          |  3 +
+ include/rex/ui/vulkan/presenter.h             |  7 +++
+ src/ui/vulkan/vulkan_device.cpp               |  5 ++
+ src/ui/vulkan/vulkan_presenter.cpp            | 59 +++++++++++++++++++
+ 5 files changed, 77 insertions(+)
+ create mode 100644 include/rex/ui/vulkan/functions/device_google_display_timing.inc
+
+diff --git a/include/rex/ui/vulkan/device.h b/include/rex/ui/vulkan/device.h
+index 947817f..b1b0955 100644
+--- a/include/rex/ui/vulkan/device.h
++++ b/include/rex/ui/vulkan/device.h
+@@ -182,6 +182,7 @@ class VulkanDevice {
+   // `ext_major_minor_` prefix rather than `ext_`).
+   struct Extensions {
+     bool ext_KHR_swapchain = false;                     // #2
++    bool ext_GOOGLE_display_timing = false;             // #93
+     bool ext_1_1_KHR_dedicated_allocation = false;      // #128
+     bool ext_EXT_shader_stencil_export = false;         // #141
+     bool ext_1_1_KHR_get_memory_requirements2 = false;  // #147
+@@ -212,6 +213,8 @@ class VulkanDevice {
+ #include <rex/ui/vulkan/functions/device_1_0.inc>
+     // VK_KHR_swapchain (#2)
+ #include <rex/ui/vulkan/functions/device_khr_swapchain.inc>
++    // VK_GOOGLE_display_timing (#93)
++#include <rex/ui/vulkan/functions/device_google_display_timing.inc>
+     // VK_KHR_get_memory_requirements2 (#147, promoted to 1.1)
+ #include <rex/ui/vulkan/functions/device_1_1_khr_get_memory_requirements2.inc>
+     // VK_KHR_bind_memory2 (#158, promoted to 1.1)
+diff --git a/include/rex/ui/vulkan/functions/device_google_display_timing.inc b/include/rex/ui/vulkan/functions/device_google_display_timing.inc
+new file mode 100644
+index 0000000..e8d641a
+--- /dev/null
++++ b/include/rex/ui/vulkan/functions/device_google_display_timing.inc
+@@ -0,0 +1,3 @@
++// VK_GOOGLE_display_timing functions used by Xenia.
++XE_UI_VULKAN_FUNCTION(vkGetRefreshCycleDurationGOOGLE)
++XE_UI_VULKAN_FUNCTION(vkGetPastPresentationTimingGOOGLE)
+diff --git a/include/rex/ui/vulkan/presenter.h b/include/rex/ui/vulkan/presenter.h
+index 56ee43b..bc60610 100644
+--- a/include/rex/ui/vulkan/presenter.h
++++ b/include/rex/ui/vulkan/presenter.h
+@@ -414,6 +414,13 @@ class VulkanPresenter final : public Presenter {
+     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+     VkExtent2D swapchain_extent = {};
+     bool swapchain_is_fifo = false;
++    // Display-timing pacing (VK_GOOGLE_display_timing).
++    VkSwapchainKHR timing_swapchain = VK_NULL_HANDLE;
++    uint64_t timing_refresh_ns = 0;
++    uint64_t timing_last_desired_ns = 0;
++    uint64_t timing_last_call_ns = 0;
++    double timing_interval_ema_ns = 33333333.0;
++    uint32_t timing_present_id = 0;
+     std::vector<VkImage> swapchain_images;
+     std::vector<SwapchainFramebuffer> swapchain_framebuffers;
+   };
+diff --git a/src/ui/vulkan/vulkan_device.cpp b/src/ui/vulkan/vulkan_device.cpp
+index 8197bb4..0b1e9ef 100644
+--- a/src/ui/vulkan/vulkan_device.cpp
++++ b/src/ui/vulkan/vulkan_device.cpp
+@@ -201,6 +201,8 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+   if (with_swapchain) {
+     // #2.
+     XE_UI_VULKAN_STRUCT_EXTENSION(KHR_swapchain)
++    // #93. Used for evenly paced presentation on Android.
++    XE_UI_VULKAN_STRUCT_EXTENSION(GOOGLE_display_timing)
+   }
+ 
+   bool ext_1_2_KHR_sampler_mirror_clamp_to_edge = false;
+@@ -802,6 +804,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+   if (device->extensions_.ext_KHR_swapchain) {
+ #include <rex/ui/vulkan/functions/device_khr_swapchain.inc>
+   }
++  if (device->extensions_.ext_GOOGLE_display_timing) {
++#include <rex/ui/vulkan/functions/device_google_display_timing.inc>
++  }
+ #undef XE_UI_VULKAN_FUNCTION_PROMOTED
+ 
+ #undef XE_UI_VULKAN_FUNCTION
+diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
+index 23645ef..f178408 100644
+--- a/src/ui/vulkan/vulkan_presenter.cpp
++++ b/src/ui/vulkan/vulkan_presenter.cpp
+@@ -15,6 +15,7 @@
+ #include <cstdint>
+ #include <cmath>
+ #include <cstring>
++#include <ctime>
+ #include <memory>
+ #include <utility>
+ #include <vector>
+@@ -49,6 +50,9 @@
+ REXCVAR_DEFINE_BOOL(present_render_pass_clear, true, "UI/Presenter",
+                     "Clear render pass during presentation");
+ 
++REXCVAR_DEFINE_BOOL(vulkan_present_display_timing, true, "UI/Vulkan",
++                    "Schedule each presented frame on an even beat of display refreshes using "
++                    "VK_GOOGLE_display_timing when available (smooth frame pacing on Android)");
+ REXCVAR_DEFINE_BOOL(vulkan_allow_present_mode_immediate, true, "UI/Vulkan",
+                     "Allow immediate present mode (no vsync)");
+ 
+@@ -2230,6 +2234,61 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+   VkPresentInfoKHR present_info;
+   present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+   present_info.pNext = nullptr;
++
++  // Even frame pacing: ask the display to show this frame a whole number of
++  // refresh cycles after the previous one, matching the rate frames arrive at,
++  // so every frame stays on screen for the same time.
++  VkPresentTimeGOOGLE present_time = {};
++  VkPresentTimesInfoGOOGLE present_times_info = {};
++#if !defined(_WIN32)
++  if (REXCVAR_GET(vulkan_present_display_timing) &&
++      vulkan_device_->extensions().ext_GOOGLE_display_timing && paint_context_.swapchain_is_fifo) {
++    if (paint_context_.timing_swapchain != paint_context_.swapchain) {
++      paint_context_.timing_swapchain = paint_context_.swapchain;
++      paint_context_.timing_refresh_ns = 0;
++      paint_context_.timing_last_desired_ns = 0;
++      VkRefreshCycleDurationGOOGLE refresh_cycle = {};
++      if (dfn.vkGetRefreshCycleDurationGOOGLE(device, paint_context_.swapchain, &refresh_cycle) ==
++              VK_SUCCESS &&
++          refresh_cycle.refreshDuration >= 2000000 && refresh_cycle.refreshDuration <= 50000000) {
++        paint_context_.timing_refresh_ns = refresh_cycle.refreshDuration;
++        REXLOG_INFO("VulkanPresenter: display refresh {:.2f} Hz, paced presentation enabled",
++                    1e9 / double(refresh_cycle.refreshDuration));
++      }
++    }
++    uint64_t refresh = paint_context_.timing_refresh_ns;
++    if (refresh) {
++      timespec ts;
++      clock_gettime(CLOCK_MONOTONIC, &ts);
++      uint64_t now = uint64_t(ts.tv_sec) * 1000000000ull + uint64_t(ts.tv_nsec);
++      if (paint_context_.timing_last_call_ns) {
++        double interval = double(now - paint_context_.timing_last_call_ns);
++        interval = std::clamp(interval, 1e6, 100e6);
++        paint_context_.timing_interval_ema_ns =
++            paint_context_.timing_interval_ema_ns * 0.9 + interval * 0.1;
++      }
++      paint_context_.timing_last_call_ns = now;
++      uint64_t cycles = std::max<uint64_t>(
++          1, uint64_t(std::llround(paint_context_.timing_interval_ema_ns / double(refresh))));
++      uint64_t step = cycles * refresh;
++      // Leave room for the GPU to finish the frame before it is due.
++      uint64_t earliest = now + std::max<uint64_t>(2 * refresh, 25000000ull);
++      uint64_t desired = paint_context_.timing_last_desired_ns + step;
++      if (!paint_context_.timing_last_desired_ns || desired < earliest ||
++          desired > now + 4 * step + 25000000ull) {
++        desired = earliest;  // (Re)start the cadence.
++      }
++      paint_context_.timing_last_desired_ns = desired;
++      present_time.presentID = ++paint_context_.timing_present_id;
++      present_time.desiredPresentTime = desired;
++      present_times_info.sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE;
++      present_times_info.pNext = nullptr;
++      present_times_info.swapchainCount = 1;
++      present_times_info.pTimes = &present_time;
++      present_info.pNext = &present_times_info;
++    }
++  }
++#endif  // !_WIN32
+   present_info.waitSemaphoreCount = 1;
+   present_info.pWaitSemaphores = &present_semaphore;
+   present_info.swapchainCount = 1;
+-- 
+2.43.0
+

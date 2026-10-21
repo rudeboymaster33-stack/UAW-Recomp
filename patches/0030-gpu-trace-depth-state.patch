@@ -1,0 +1,31 @@
+From 04ed4da758b850405637b32e3e8363dd486143b2 Mon Sep 17 00:00:00 2001
+From: Kylie <rudeboymaster33@gmail.com>
+Date: Tue, 20 Oct 2026 20:49:30 -0400
+Subject: [PATCH] vulkan: [gpu-dt] also record depth/stencil/blend/raster state
+ per pass
+
+---
+ src/graphics/vulkan/command_processor.cpp | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index e7e31c1..215c7d0 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -4747,6 +4747,13 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+     if (pixel_shader) {
+       dtrace_items_.insert(fmt::format("ps{:016X}", pixel_shader->ucode_data_hash()));
+     }
++    dtrace_items_.insert(fmt::format("dc{:08X}/cc{:08X}/st{:08X}/bl{:08X}/vte{:08X}/su{:08X}",
++                                     regs[XE_GPU_REG_RB_DEPTHCONTROL],
++                                     regs[XE_GPU_REG_RB_COLORCONTROL],
++                                     regs[XE_GPU_REG_RB_STENCILREFMASK],
++                                     regs[XE_GPU_REG_RB_BLENDCONTROL0],
++                                     regs[XE_GPU_REG_PA_CL_VTE_CNTL],
++                                     regs[XE_GPU_REG_PA_SU_SC_MODE_CNTL]));
+     uint32_t dmask = used_texture_mask;
+     while (dmask) {
+       uint32_t ti = uint32_t(__builtin_ctz(dmask));
+-- 
+2.43.0
+

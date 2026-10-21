@@ -1,0 +1,62 @@
+From df3df3df72bfee925dd4cd77db7f7edcf84ab1c4 Mon Sep 17 00:00:00 2001
+From: Kylie <rudeboymaster33@gmail.com>
+Date: Mon, 19 Oct 2026 22:18:02 -0400
+Subject: [PATCH] system: link imports between game DLLs (fill import value
+ slots from the exporting user module)
+
+---
+ src/system/kernel_state.cpp | 38 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 38 insertions(+)
+
+diff --git a/src/system/kernel_state.cpp b/src/system/kernel_state.cpp
+index d21bcc7..34ce459 100644
+--- a/src/system/kernel_state.cpp
++++ b/src/system/kernel_state.cpp
+@@ -772,6 +772,44 @@ object_ref<UserModule> KernelState::LoadUserModule(const std::string_view raw_na
+ 
+   module->Dump();
+ 
++  // Imports from other game DLLs (not the kernel): fill each import's value
++  // slot with the exporting module's function address, as the console loader
++  // does. Calls through the import thunks are resolved by the recompiled code.
++  if (auto* imports = module->xex_module()->import_libraries()) {
++    for (const auto& lib : *imports) {
++      if (rex::string::utf8_equal_case(lib.name, "xboxkrnl") ||
++          rex::string::utf8_equal_case(lib.name, "xam") ||
++          rex::string::utf8_equal_case(lib.name, "xbdm")) {
++        continue;
++      }
++      auto dep = GetModule(lib.name + ".dll", /*user_only=*/true);
++      if (!dep) {
++        dep = GetModule(lib.name, /*user_only=*/true);
++      }
++      if (!dep) {
++        REXSYS_WARN("LoadUserModule: '{}' imports from '{}', which is not loaded", module->name(),
++                    lib.name);
++        continue;
++      }
++      uint32_t patched = 0;
++      for (const auto& imp : lib.imports) {
++        if (!imp.value_address) {
++          continue;
++        }
++        uint32_t target = dep->GetProcAddressByOrdinal(static_cast<uint16_t>(imp.ordinal));
++        if (!target) {
++          REXSYS_WARN("LoadUserModule: '{}' ordinal {} not exported by '{}'", module->name(),
++                      imp.ordinal, lib.name);
++          continue;
++        }
++        *memory()->TranslateVirtual<rex::be<uint32_t>*>(imp.value_address) = target;
++        ++patched;
++      }
++      REXSYS_INFO("LoadUserModule: '{}' linked {} imports from '{}'", module->name(), patched,
++                  lib.name);
++    }
++  }
++
+   // Wire recompiled code (if any) before publishing to user_modules_, so a
+   // failure in this block leaves no half-loaded entry behind.
+   auto recomp = FindRecompiledModule(path);
+-- 
+2.43.0
+

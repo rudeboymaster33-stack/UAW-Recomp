@@ -1,0 +1,166 @@
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 001f36b..3dd256d 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -69,6 +69,8 @@ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
+                     "device (falls back to render passes otherwise)")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++#include "gpu_frame_stats.h"
++
+ namespace rex::graphics::vulkan {
+ 
+ namespace {
+@@ -2269,9 +2271,28 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
+   gamma_ramp_pwl_current_frame_ = UINT32_MAX;
+ }
+ 
++GpuFrameStats& GetGpuFrameStats() {
++  static GpuFrameStats stats;
++  return stats;
++}
++
+ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
+                                        uint32_t frontbuffer_height) {
+   SCOPE_profile_cpu_f("gpu");
++  {
++    GpuFrameStats& st = GetGpuFrameStats();
++    if (++st.frames >= 120) {
++      double f = double(st.frames);
++      REXGPU_INFO(
++          "[gpu-stats] per frame: draws={:.0f} passes={:.1f} pass_area={:.2f}MPix "
++          "transfer_passes={:.1f} clear_passes={:.1f} resolves={:.1f} barrier_batches={:.1f} "
++          "submissions={:.2f} texture_loads={:.1f}",
++          st.draws / f, st.passes / f, st.pass_mpixels_x1000 / f / 1000.0, st.transfer_passes / f,
++          st.clear_passes / f, st.resolves / f, st.barrier_batches / f, st.submissions / f,
++          st.texture_loads / f);
++      st = GpuFrameStats{};
++    }
++  }
+   vertex_buffers_in_sync_[0] = 0;
+   vertex_buffers_in_sync_[1] = 0;
+ 
+@@ -3061,6 +3082,7 @@ bool VulkanCommandProcessor::SubmitBarriers(bool force_end_render_pass) {
+     return false;
+   }
+   EndRenderPass();
++  ++GetGpuFrameStats().barrier_batches;
+   for (auto it = pending_barriers_.cbegin(); it != pending_barriers_.cend(); ++it) {
+     auto it_next = std::next(it);
+     bool is_last = it_next == pending_barriers_.cend();
+@@ -3117,6 +3139,12 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+ 
+   current_render_pass_ = use_dynamic_rendering ? VK_NULL_HANDLE : render_pass;
+   current_framebuffer_ = framebuffer;
++  {
++    GpuFrameStats& st = GetGpuFrameStats();
++    ++st.passes;
++    st.pass_mpixels_x1000 +=
++        uint64_t(framebuffer->host_extent.width) * framebuffer->host_extent.height / 1000;
++  }
+ 
+   if (use_dynamic_rendering) {
+     VkRenderingAttachmentInfo color_attachments[xenos::kMaxColorRenderTargets];
+@@ -3590,6 +3618,7 @@ Shader* VulkanCommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32
+ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
+                                        IndexBufferInfo* index_buffer_info,
+                                        bool major_mode_explicit) {
++  ++GetGpuFrameStats().draws;
+ #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
+   SCOPE_profile_cpu_f("gpu");
+ #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+@@ -4382,6 +4411,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
+ }
+ 
+ bool VulkanCommandProcessor::IssueCopy() {
++  ++GetGpuFrameStats().resolves;
+ #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
+   SCOPE_profile_cpu_f("gpu");
+ #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+@@ -5230,6 +5260,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+ }
+ 
+ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
++  ++GetGpuFrameStats().submissions;
+   const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
+   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+   const VkDevice device = vulkan_device->device();
+diff --git a/src/graphics/vulkan/gpu_frame_stats.h b/src/graphics/vulkan/gpu_frame_stats.h
+new file mode 100644
+index 0000000..d9cbb5c
+--- /dev/null
++++ b/src/graphics/vulkan/gpu_frame_stats.h
+@@ -0,0 +1,23 @@
++#pragma once
++// Lightweight per-frame counters for the Vulkan backend (command processor
++// thread only). Logged as [gpu-stats] every 120 guest frames.
++#include <cstdint>
++
++namespace rex::graphics::vulkan {
++
++struct GpuFrameStats {
++  uint64_t draws = 0;
++  uint64_t passes = 0;          // render pass / dynamic rendering begins
++  uint64_t pass_mpixels_x1000 = 0;  // sum of render area (thousand-pixels)
++  uint64_t transfer_passes = 0; // EDRAM ownership transfer passes
++  uint64_t clear_passes = 0;    // resolve clears
++  uint64_t resolves = 0;
++  uint64_t barrier_batches = 0; // SubmitBarriers that issued barriers (ends render pass)
++  uint64_t submissions = 0;
++  uint64_t texture_loads = 0;
++  uint64_t frames = 0;
++};
++
++GpuFrameStats& GetGpuFrameStats();
++
++}  // namespace rex::graphics::vulkan
+diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
+index 0298f06..f087665 100644
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -62,6 +62,8 @@ REXCVAR_DEFINE_STRING(render_target_path_vulkan, "", "GPU/Vulkan",
+ //     "always FB because the FSI path is much slower now).",
+ //     "GPU");
+ 
++#include "gpu_frame_stats.h"
++
+ namespace rex::graphics::vulkan {
+ 
+ // Generated with `xb buildshaders`.
+@@ -4963,6 +4965,7 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+       }
+ 
+       // Perform the transfers for the render target.
++      ++GetGpuFrameStats().transfer_passes;
+ 
+       command_processor_.SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+           transfer_render_pass, transfer_framebuffer, transfer_dest_view, dest_rt_key.is_depth);
+@@ -5277,6 +5280,7 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+ 
+     // Perform the clear.
+     if (resolve_clear_needed) {
++      ++GetGpuFrameStats().clear_passes;
+       command_processor_.SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+           transfer_render_pass, transfer_framebuffer, transfer_dest_view, dest_rt_key.is_depth);
+       VkClearAttachment resolve_clear_attachment;
+diff --git a/src/graphics/vulkan/texture_cache.cpp b/src/graphics/vulkan/texture_cache.cpp
+index ecbd940..01f326f 100644
+--- a/src/graphics/vulkan/texture_cache.cpp
++++ b/src/graphics/vulkan/texture_cache.cpp
+@@ -35,6 +35,8 @@
+ 
+ REXCVAR_DEFINE_BOOL(non_seamless_cube_map, false, "GPU", "Use non-seamless cube map sampling");
+ 
++#include "gpu_frame_stats.h"
++
+ namespace rex::graphics::vulkan {
+ 
+ // Generated with `xb buildshaders`.
+@@ -1215,6 +1217,7 @@ bool VulkanTextureCache::EnsureScaledResolveMemoryCommitted(uint32_t start_unsca
+ 
+ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base,
+                                                                bool load_mips) {
++  ++GetGpuFrameStats().texture_loads;
+   VulkanTexture& vulkan_texture = static_cast<VulkanTexture&>(texture);
+   TextureKey texture_key = vulkan_texture.key();
+ 

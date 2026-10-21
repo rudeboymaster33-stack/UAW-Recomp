@@ -1,0 +1,32 @@
+From 7e56c16b7bfdf948e91bdc91cb4b95ae68683079 Mon Sep 17 00:00:00 2001
+From: Kylie <rudeboymaster33@gmail.com>
+Date: Tue, 20 Oct 2026 21:19:39 -0400
+Subject: [PATCH] vulkan: [gpu-dt] with full readback, summarise each resolve
+ right after it
+
+---
+ src/graphics/vulkan/command_processor.cpp | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 9113e57..f089c41 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -5094,7 +5094,13 @@ bool VulkanCommandProcessor::IssueCopy() {
+                                          written_address, written_length);
+   }
+ 
+-  return IssueCopy_ReadbackResolvePath();
++  bool copy_result = IssueCopy_ReadbackResolvePath();
++  if (pass_trace_active_ && readback_mode == ReadbackResolveMode::kFull) {
++    // Full readback: guest memory already holds this resolve's result -
++    // summarise it now, before later resolves reuse the same memory.
++    DTraceSummariseResolves();
++  }
++  return copy_result;
+ }
+ 
+ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+-- 
+2.43.0
+

@@ -1,0 +1,32 @@
+From 1de3e005b13f1f297819b48e8be3ef1d9317a267 Mon Sep 17 00:00:00 2001
+From: UAW Recomp <noreply@anthropic.com>
+Date: Sun, 18 Oct 2026 20:32:02 -0400
+Subject: [PATCH] gpu: rate-limit the incorrect resolve sample warning (log
+ spam with MSAA override)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ src/graphics/util/draw.cpp | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/src/graphics/util/draw.cpp b/src/graphics/util/draw.cpp
+index 305380e..d11585f 100644
+--- a/src/graphics/util/draw.cpp
++++ b/src/graphics/util/draw.cpp
+@@ -901,7 +901,11 @@ bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
+   // Get the sample selection to safely pass to the shader.
+   xenos::CopySampleSelect sample_select = SanitizeCopySampleSelect(
+       rb_copy_control.copy_sample_select, rb_surface_info.msaa_samples, is_depth);
+-  if (rb_copy_control.copy_sample_select != sample_select) {
++  static uint32_t incorrect_sample_select_warnings = 0;
++  if (rb_copy_control.copy_sample_select != sample_select &&
++      incorrect_sample_select_warnings < 5) {
++    // Warn only a few times: with gpu_force_msaa_1x this happens every resolve.
++    ++incorrect_sample_select_warnings;
+     REXGPU_WARN(
+         "Incorrect resolve sample selected for {}-sample {}: {}, treating like "
+         "{}",
+-- 
+2.43.0
+

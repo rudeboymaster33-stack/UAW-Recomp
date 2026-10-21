@@ -1,0 +1,89 @@
+From 4548450a52a7c5f7533fa93ec1308b9240810434 Mon Sep 17 00:00:00 2001
+From: Kylie <rudeboymaster33@gmail.com>
+Date: Tue, 20 Oct 2026 21:14:13 -0400
+Subject: [PATCH] spirv: vulkan_shader_demote switch and gpu_debug_ignore_kill
+ diagnostic
+
+---
+ include/rex/graphics/flags.h                          | 2 ++
+ src/graphics/flags.cpp                                | 5 +++++
+ src/graphics/pipeline/shader/spirv_translator.cpp     | 4 +++-
+ src/graphics/pipeline/shader/spirv_translator_alu.cpp | 4 ++++
+ 4 files changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/include/rex/graphics/flags.h b/include/rex/graphics/flags.h
+index 2cf24c4..db64f05 100644
+--- a/include/rex/graphics/flags.h
++++ b/include/rex/graphics/flags.h
+@@ -72,6 +72,8 @@ REXCVAR_DECLARE(bool, use_fuzzy_alpha_epsilon);
+ 
+ // GPU Shader Translation
+ REXCVAR_DECLARE(std::string, dump_shaders);
++REXCVAR_DECLARE(bool, vulkan_shader_demote);
++REXCVAR_DECLARE(bool, gpu_debug_ignore_kill);
+ REXCVAR_DECLARE(std::string, swap_post_effect);
+ 
+ #if REX_HAS_VULKAN
+diff --git a/src/graphics/flags.cpp b/src/graphics/flags.cpp
+index e2983a4..7ac471f 100644
+--- a/src/graphics/flags.cpp
++++ b/src/graphics/flags.cpp
+@@ -25,6 +25,11 @@ REXCVAR_DEFINE_BOOL(gamma_render_target_as_unorm16, true, "GPU",
+                     "Use R16G16B16A16_UNORM for gamma render targets (more accurate than sRGB)")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ REXCVAR_DEFINE_STRING(dump_shaders, "", "GPU", "Path to dump shaders to");
++REXCVAR_DEFINE_BOOL(vulkan_shader_demote, true, "GPU/Vulkan",
++                    "Use demote-to-helper-invocation for guest pixel kills when the device "
++                    "supports it (false: kill flag and discard at the end of the shader)");
++REXCVAR_DEFINE_BOOL(gpu_debug_ignore_kill, false, "GPU",
++                    "Diagnostic only (breaks visuals): ignore guest pixel kill instructions");
+ REXCVAR_DEFINE_BOOL(use_fuzzy_alpha_epsilon, false, "GPU",
+                     "Use approximate compare for alpha test values to prevent "
+                     "flickering on NVIDIA graphics cards");
+diff --git a/src/graphics/pipeline/shader/spirv_translator.cpp b/src/graphics/pipeline/shader/spirv_translator.cpp
+index 1774f97..405b5fa 100644
+--- a/src/graphics/pipeline/shader/spirv_translator.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator.cpp
+@@ -21,6 +21,7 @@
+ #include <fmt/format.h>
+ 
+ #include <rex/assert.h>
++#include <rex/graphics/flags.h>
+ #include <rex/graphics/pipeline/shader/spirv.h>
+ #include <rex/graphics/pipeline/shader/spirv_translator.h>
+ #include <rex/math.h>
+@@ -58,7 +59,8 @@ SpirvShaderTranslator::Features::Features(const ui::vulkan::VulkanDevice* const
+       denorm_flush_to_zero_float32(vulkan_device->properties().shaderDenormFlushToZeroFloat32),
+       rounding_mode_rte_float32(vulkan_device->properties().shaderRoundingModeRTEFloat32),
+       fragment_shader_sample_interlock(vulkan_device->properties().fragmentShaderSampleInterlock),
+-      demote_to_helper_invocation(vulkan_device->properties().shaderDemoteToHelperInvocation),
++      demote_to_helper_invocation(vulkan_device->properties().shaderDemoteToHelperInvocation &&
++                                  REXCVAR_GET(vulkan_shader_demote)),
+       sample_rate_shading(vulkan_device->properties().sampleRateShading) {
+   const uint32_t vulkan_api_version = vulkan_device->properties().apiVersion;
+   if (vulkan_api_version >= VK_MAKE_API_VERSION(0, 1, 2, 0)) {
+diff --git a/src/graphics/pipeline/shader/spirv_translator_alu.cpp b/src/graphics/pipeline/shader/spirv_translator_alu.cpp
+index 706ac7e..67a6fb2 100644
+--- a/src/graphics/pipeline/shader/spirv_translator_alu.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator_alu.cpp
+@@ -17,6 +17,7 @@
+ #include <SPIRV/GLSL.std.450.h>
+ 
+ #include <rex/assert.h>
++#include <rex/graphics/flags.h>
+ #include <rex/graphics/pipeline/shader/spirv_translator.h>
+ #include <rex/math.h>
+ 
+@@ -40,6 +41,9 @@ spv::Id SpirvShaderTranslator::ZeroIfAnyOperandIsZero(spv::Id value, spv::Id ope
+ 
+ void SpirvShaderTranslator::KillPixel(spv::Id condition,
+                                       uint8_t memexport_eM_potentially_written_before) {
++  if (REXCVAR_GET(gpu_debug_ignore_kill)) {
++    return;
++  }
+   SpirvBuilder::IfBuilder kill_if(condition, spv::SelectionControlMaskNone, *builder_);
+   {
+     // Perform outstanding memory exports before the invocation becomes inactive
+-- 
+2.43.0
+

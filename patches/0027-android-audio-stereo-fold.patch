@@ -1,0 +1,33 @@
+From 5d84216d2c426b0c9930a0f8bffa827f19eb109f Mon Sep 17 00:00:00 2001
+From: Kylie <rudeboymaster33@gmail.com>
+Date: Tue, 20 Oct 2026 19:55:18 -0400
+Subject: [PATCH] audio/android: always fold 5.1 to stereo in the output stage
+
+---
+ src/audio/sdl/sdl_audio_driver.cpp | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/src/audio/sdl/sdl_audio_driver.cpp b/src/audio/sdl/sdl_audio_driver.cpp
+index 20a2cd8..3420f55 100644
+--- a/src/audio/sdl/sdl_audio_driver.cpp
++++ b/src/audio/sdl/sdl_audio_driver.cpp
+@@ -75,7 +75,15 @@ bool SDLAudioDriver::Initialize() {
+ 
+   // A 1-channel device gets the stereo fold too, then SDL collapses to mono.
+   // Handing it a 6ch stream instead would use SDL's own downmix.
+-  if (obtained_spec.channels <= 2) {
++  // Android: phones and handhelds play through stereo speakers or headphones
++  // even when the endpoint reports more channels, and the system's own 5.1 to
++  // stereo downmix comes out quiet. Always fold to stereo here instead.
++#if defined(__ANDROID__)
++  const bool fold_to_stereo = true;
++#else
++  const bool fold_to_stereo = obtained_spec.channels <= 2;
++#endif
++  if (fold_to_stereo) {
+     SDL_DestroyAudioStream(sdl_stream_);
+     sdl_stream_ = nullptr;
+     desired_spec.channels = 2;
+-- 
+2.43.0
+

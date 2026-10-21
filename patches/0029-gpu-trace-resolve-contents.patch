@@ -1,0 +1,96 @@
+From c6fcb53332a68e8c76f7ef230cf5c02b7be2b10b Mon Sep 17 00:00:00 2001
+From: Kylie <rudeboymaster33@gmail.com>
+Date: Tue, 20 Oct 2026 20:36:27 -0400
+Subject: [PATCH] vulkan: [gpu-dt] summarise resolve destinations in guest
+ memory at the end of the traced frame
+
+---
+ .../rex/graphics/vulkan/command_processor.h   |  4 ++
+ src/graphics/vulkan/command_processor.cpp     | 42 +++++++++++++++++++
+ 2 files changed, 46 insertions(+)
+
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+index 455ab68..8d4f92e 100644
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -880,6 +880,10 @@ class VulkanCommandProcessor : public CommandProcessor {
+   std::set<std::string> dtrace_items_;
+   uint32_t dtrace_draws_ = 0;
+   void DTraceFlush();
++  // Resolve destinations of the traced frame (address, bytes), whose guest
++  // memory contents are summarised at the end of the frame.
++  std::vector<std::pair<uint32_t, uint32_t>> dtrace_resolves_;
++  void DTraceSummariseResolves();
+   void PassTraceFlushDraws();
+   void PassTraceAppend(const char* text);
+   void NoteBarrierPassBreak();
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 3ef7309..e7e31c1 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -2357,6 +2357,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+       REXGPU_INFO("[gpu-trace] {}", pass_trace_.substr(pos, 900));
+     }
+     DTraceFlush();
++    DTraceSummariseResolves();
+     REXGPU_INFO("[gpu-dt] end of frame");
+     REXGPU_INFO("[gpu-trace] end of frame");
+     pass_trace_.clear();
+@@ -3727,6 +3728,42 @@ void VulkanCommandProcessor::PassTraceFlushDraws() {
+   }
+ }
+ 
++void VulkanCommandProcessor::DTraceSummariseResolves() {
++  // Summarise what each resolve destination holds in guest memory now (only
++  // meaningful with readback_resolve=full, where resolves are read back).
++  std::vector<std::pair<uint32_t, uint32_t>> seen;
++  for (const auto& [addr, bytes] : dtrace_resolves_) {
++    bool dup = false;
++    for (const auto& s : seen) {
++      dup |= s.first == addr;
++    }
++    if (dup || !bytes) {
++      continue;
++    }
++    seen.emplace_back(addr, bytes);
++    uint32_t words = std::min<uint32_t>(bytes, 16u << 20) / 4;
++    const uint32_t* data = memory_->TranslatePhysical<const uint32_t*>(addr & 0x1FFFFFFF);
++    uint32_t nonzero = 0;
++    std::set<uint32_t> distinct;
++    uint32_t sample[6] = {};
++    for (uint32_t i = 0; i < words; ++i) {
++      uint32_t v = data[i];
++      nonzero += v != 0;
++      if (distinct.size() < 4096) {
++        distinct.insert(v);
++      }
++    }
++    for (uint32_t i = 0; i < 6; ++i) {
++      sample[i] = data[(words / 7) * (i + 1)];
++    }
++    REXGPU_INFO("[gpu-dt] MEM {:08X} bytes={} nonzero={} distinct={}{} sample={:08X} {:08X} {:08X} "
++                "{:08X} {:08X} {:08X}",
++                addr, bytes, nonzero, distinct.size(), distinct.size() >= 4096 ? "+" : "",
++                sample[0], sample[1], sample[2], sample[3], sample[4], sample[5]);
++  }
++  dtrace_resolves_.clear();
++}
++
+ void VulkanCommandProcessor::DTraceFlush() {
+   if (!dtrace_draws_ && dtrace_items_.empty()) {
+     return;
+@@ -5017,6 +5054,11 @@ bool VulkanCommandProcessor::IssueCopy() {
+                 dregs[XE_GPU_REG_RB_COLOR1_INFO], dregs[XE_GPU_REG_RB_DEPTH_INFO],
+                 dregs[XE_GPU_REG_RB_COPY_SURFACE_SLICE], dregs[XE_GPU_REG_PA_SC_WINDOW_OFFSET],
+                 dregs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR], dregs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL]);
++    uint32_t dpitch = dregs[XE_GPU_REG_RB_COPY_DEST_PITCH];
++    uint32_t dw = dpitch & 0x3FFF, dh = (dpitch >> 16) & 0x3FFF;
++    uint32_t dfmt = (dregs[XE_GPU_REG_RB_COPY_DEST_INFO] >> 7) & 0x3F;
++    uint32_t dbpp = (dfmt == 26 || dfmt == 32 || dfmt == 29) ? 8 : 4;
++    dtrace_resolves_.emplace_back(dregs[XE_GPU_REG_RB_COPY_DEST_BASE], dw * dh * dbpp);
+   }
+ #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
+   SCOPE_profile_cpu_f("gpu");
+-- 
+2.43.0
+

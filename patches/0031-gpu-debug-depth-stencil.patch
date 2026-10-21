@@ -1,0 +1,43 @@
+From 70746ede98729fefb20f29587cafc436fb9ade3c Mon Sep 17 00:00:00 2001
+From: Kylie <rudeboymaster33@gmail.com>
+Date: Tue, 20 Oct 2026 21:05:57 -0400
+Subject: [PATCH] vulkan: diagnostic switches gpu_debug_depth_always and
+ gpu_debug_stencil_off
+
+---
+ src/graphics/vulkan/command_processor.cpp | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 215c7d0..9113e57 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -81,6 +81,10 @@ REXCVAR_DEFINE_INT32(gpu_force_msaa_1x_pitch, 0, "GPU",
+ REXCVAR_DEFINE_BOOL(vulkan_debug_msaa_experiment, false, "GPU",
+                     "Diagnostic only (breaks visuals): every 600 frames cycle between normal, "
+                     "1x1 scissor and skipped draws in 4x MSAA passes, logged as [gpu-exp]");
++REXCVAR_DEFINE_BOOL(gpu_debug_depth_always, false, "GPU",
++                    "Diagnostic only (breaks visuals): make every depth test pass");
++REXCVAR_DEFINE_BOOL(gpu_debug_stencil_off, false, "GPU",
++                    "Diagnostic only (breaks visuals): disable the stencil test");
+ REXCVAR_DEFINE_BOOL(vulkan_gpu_timestamps, false, "GPU",
+                     "Profile GPU time per category (passes, transfers, outside-pass work) "
+                     "with timestamp queries and log [gpu-time] lines");
+@@ -4276,6 +4280,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+     draw_util::AddMemExportRanges(regs, *pixel_shader, memexport_ranges_);
+   }
+   reg::RB_DEPTHCONTROL normalized_depth_control = draw_util::GetNormalizedDepthControl(regs);
++  // Diagnostics only (wrong visuals): make every depth test pass / turn the
++  // stencil test off, to find out whether they are what rejects a draw.
++  if (REXCVAR_GET(gpu_debug_depth_always) && normalized_depth_control.z_enable) {
++    normalized_depth_control.zfunc = xenos::CompareFunction::kAlways;
++  }
++  if (REXCVAR_GET(gpu_debug_stencil_off)) {
++    normalized_depth_control.stencil_enable = 0;
++  }
+ 
+   if (guest_zpd_query_open_) {
+     GpuFrameStats& qst = GetGpuFrameStats();
+-- 
+2.43.0
+
