@@ -1,0 +1,244 @@
+From d3b00881cf378f2a569792ae187de6eae7142d2f Mon Sep 17 00:00:00 2001
+From: UAW Recomp <noreply@anthropic.com>
+Date: Sun, 18 Oct 2026 18:42:50 -0400
+Subject: [PATCH] vulkan: one-frame pass trace and pass-break attribution
+ ([gpu-trace], [gpu-breaks])
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ .../rex/graphics/vulkan/command_processor.h   |  16 +++
+ src/graphics/vulkan/command_processor.cpp     | 113 ++++++++++++++++++
+ 2 files changed, 129 insertions(+)
+
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+index e546d89..af92981 100644
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -846,6 +846,22 @@ class VulkanCommandProcessor : public CommandProcessor {
+   uint64_t gpu_ts_slot_area_kpix_[kGpuTsSlots] = {};
+   uint32_t gpu_ts_slot_cpu_passes_[kGpuTsSlots] = {};
+   uint32_t gpu_ts_cur_slot_ = 0;  // 1-based, 0 = not in a tracked draw pass.
++  // Pass-break attribution: return address of the code that pushed the last
++  // barrier, counted when that barrier breaks an open render pass.
++  void* last_barrier_pusher_ = nullptr;
++  bool last_barrier_is_image_ = false;
++  void* break_pushers_[16] = {};
++  uint32_t break_pusher_counts_[16] = {};
++  uint32_t break_pusher_image_[16] = {};
++  // One-frame trace of the pass sequence (logged as [gpu-trace]).
++  bool pass_trace_active_ = false;
++  uint32_t pass_trace_frame_countdown_ = 0;
++  std::string pass_trace_;
++  uint32_t pass_trace_draws_ = 0;
++  void PassTraceFlushDraws();
++  void PassTraceAppend(const char* text);
++  void NoteBarrierPassBreak();
++  void LogPassBreakPushers(double frames);
+   void GpuTsBeginSubmission();
+   void GpuTsMark(uint32_t tag);
+   void GpuTsEndSubmission();
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index d0a5445..b95472f 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -79,6 +79,12 @@ REXCVAR_DEFINE_BOOL(vulkan_tight_render_area, true, "GPU",
+                     "(large win on tile-based mobile GPUs)");
+ 
+ #include "gpu_frame_stats.h"
++#if !defined(_WIN32)
++#include <cxxabi.h>
++#include <dlfcn.h>
++#endif
++#include <cstdlib>
++#include <cstring>
+ 
+ namespace rex::graphics::vulkan {
+ 
+@@ -2305,6 +2311,23 @@ GpuFrameStats& GetGpuFrameStats() {
+ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
+                                        uint32_t frontbuffer_height) {
+   SCOPE_profile_cpu_f("gpu");
++  if (pass_trace_active_) {
++    PassTraceFlushDraws();
++    pass_trace_active_ = false;
++    // Log in chunks to stay within log line limits.
++    for (size_t pos = 0; pos < pass_trace_.size(); pos += 900) {
++      REXGPU_INFO("[gpu-trace] {}", pass_trace_.substr(pos, 900));
++    }
++    REXGPU_INFO("[gpu-trace] end of frame");
++    pass_trace_.clear();
++  }
++  if (pass_trace_frame_countdown_ && REXCVAR_GET(vulkan_gpu_timestamps)) {
++    if (--pass_trace_frame_countdown_ == 0) {
++      pass_trace_active_ = true;
++      pass_trace_.clear();
++      pass_trace_draws_ = 0;
++    }
++  }
+   {
+     GpuFrameStats& st = GetGpuFrameStats();
+     if (++st.frames >= 120) {
+@@ -2332,7 +2355,10 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+           st.queries / f, st.query_draws / f, st.query_draws_skipped / f,
+           st.query_draws_zwrite / f, st.query_draws_color / f, st.query_draws_other / f);
+       GpuTsLog(f);
++      LogPassBreakPushers(f);
+       st = GpuFrameStats{};
++      // Trace one whole frame a little later (not the frame being logged).
++      pass_trace_frame_countdown_ = 30;
+     }
+   }
+   vertex_buffers_in_sync_[0] = 0;
+@@ -3000,6 +3026,8 @@ bool VulkanCommandProcessor::PushBufferMemoryBarrier(
+     VkAccessFlags dst_access_mask, uint32_t src_queue_family_index, uint32_t dst_queue_family_index,
+     bool skip_if_equal) {
+   ++GetGpuFrameStats().buffer_barriers;
++  last_barrier_pusher_ = __builtin_return_address(0);
++  last_barrier_is_image_ = false;
+   if (skip_if_equal && src_stage_mask == dst_stage_mask && src_access_mask == dst_access_mask &&
+       src_queue_family_index == dst_queue_family_index) {
+     return false;
+@@ -3052,6 +3080,8 @@ bool VulkanCommandProcessor::PushImageMemoryBarrier(
+     VkImageLayout new_layout, uint32_t src_queue_family_index, uint32_t dst_queue_family_index,
+     bool skip_if_equal) {
+   ++GetGpuFrameStats().image_barriers;
++  last_barrier_pusher_ = __builtin_return_address(0);
++  last_barrier_is_image_ = true;
+   if (skip_if_equal && src_stage_mask == dst_stage_mask && src_access_mask == dst_access_mask &&
+       old_layout == new_layout && src_queue_family_index == dst_queue_family_index) {
+     return false;
+@@ -3129,6 +3159,7 @@ bool VulkanCommandProcessor::SubmitBarriers(bool force_end_render_pass) {
+   }
+   if (in_render_pass_) {
+     ++GetGpuFrameStats().pass_breaks;
++    NoteBarrierPassBreak();
+   }
+   EndRenderPass();
+   ++GetGpuFrameStats().barrier_batches;
+@@ -3192,6 +3223,15 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+   GpuTsMark(kGpuSegDrawPass |
+             GpuTsExtentTag(framebuffer->host_extent,
+                            render_target_cache_->last_update_render_pass_key().key));
++  if (pass_trace_active_) {
++    VulkanRenderTargetCache::RenderPassKey trace_key =
++        render_target_cache_->last_update_render_pass_key();
++    PassTraceAppend(fmt::format(" [{}x{} m{} u{:X}", framebuffer->host_extent.width,
++                                framebuffer->host_extent.height,
++                                1u << uint32_t(trace_key.msaa_samples),
++                                uint32_t(trace_key.depth_and_color_used))
++                        .c_str());
++  }
+   {
+     GpuFrameStats& st = GetGpuFrameStats();
+     ++st.passes;
+@@ -3293,6 +3333,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+   current_framebuffer_ = framebuffer;
+   gpu_ts_cur_slot_ = 0;
+   GpuTsMark(kGpuSegTransferPass);
++  PassTraceAppend(transfer_dest_is_depth ? " XFER-D" : " XFER-C");
+ 
+   if (use_dynamic_rendering) {
+     VkRenderingAttachmentInfo color_attachment = {};
+@@ -3601,12 +3642,80 @@ void VulkanCommandProcessor::GpuTsLog(double frames) {
+   gpu_ts_batches_skipped_ = 0;
+ }
+ 
++void VulkanCommandProcessor::PassTraceFlushDraws() {
++  if (pass_trace_draws_) {
++    pass_trace_ += fmt::format(" d{}", pass_trace_draws_);
++    pass_trace_draws_ = 0;
++  }
++}
++
++void VulkanCommandProcessor::PassTraceAppend(const char* text) {
++  if (!pass_trace_active_ || pass_trace_.size() > 60000) {
++    return;
++  }
++  PassTraceFlushDraws();
++  pass_trace_ += text;
++}
++
++void VulkanCommandProcessor::NoteBarrierPassBreak() {
++  if (pass_trace_active_) {
++    PassTraceAppend(last_barrier_is_image_ ? " BARRIER-IMG" : " BARRIER-BUF");
++  }
++  if (!REXCVAR_GET(vulkan_gpu_timestamps)) {
++    return;
++  }
++  for (uint32_t i = 0; i < 16; ++i) {
++    if (break_pushers_[i] == last_barrier_pusher_ || !break_pushers_[i]) {
++      break_pushers_[i] = last_barrier_pusher_;
++      ++break_pusher_counts_[i];
++      if (last_barrier_is_image_) {
++        ++break_pusher_image_[i];
++      }
++      return;
++    }
++  }
++}
++
++void VulkanCommandProcessor::LogPassBreakPushers(double frames) {
++  for (uint32_t i = 0; i < 16 && break_pushers_[i]; ++i) {
++    std::string where = fmt::format("{}", break_pushers_[i]);
++#if !defined(_WIN32)
++    Dl_info info = {};
++    if (dladdr(break_pushers_[i], &info) && info.dli_fbase) {
++      uintptr_t offset = uintptr_t(break_pushers_[i]) - uintptr_t(info.dli_fbase);
++      std::string sym = info.dli_sname ? info.dli_sname : "?";
++      int status = 0;
++      char* demangled =
++          info.dli_sname ? abi::__cxa_demangle(info.dli_sname, nullptr, nullptr, &status) : nullptr;
++      if (demangled && status == 0) {
++        sym = demangled;
++      }
++      std::free(demangled);
++      if (sym.size() > 120) {
++        sym.resize(120);
++      }
++      where = fmt::format("{}+0x{:X} ({})", info.dli_fname ? std::strrchr(info.dli_fname, '/')
++                                                               ? std::strrchr(info.dli_fname, '/') + 1
++                                                               : info.dli_fname
++                                                           : "?",
++                          offset, sym);
++    }
++#endif
++    REXGPU_INFO("[gpu-breaks] {:.1f}/frame ({} image) from {}", break_pusher_counts_[i] / frames,
++                break_pusher_image_[i] ? "incl." : "no", where);
++  }
++  std::fill(std::begin(break_pushers_), std::end(break_pushers_), nullptr);
++  std::fill(std::begin(break_pusher_counts_), std::end(break_pusher_counts_), 0u);
++  std::fill(std::begin(break_pusher_image_), std::end(break_pusher_image_), 0u);
++}
++
+ void VulkanCommandProcessor::EndRenderPass() {
+   assert_true(submission_open_);
+   if (!in_render_pass_) {
+     return;
+   }
+   FinalizePassRenderArea();
++  PassTraceAppend("]");
+   if (current_render_pass_ == VK_NULL_HANDLE) {
+     deferred_command_buffer_.CmdVkEndRendering();
+   } else {
+@@ -4490,6 +4599,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+   if (gpu_ts_cur_slot_) {
+     ++gpu_ts_slot_draws_[gpu_ts_cur_slot_ - 1];
+   }
++  if (pass_trace_active_) {
++    ++pass_trace_draws_;
++  }
+ 
+   // Draw.
+   if (primitive_processing_result.index_buffer_type ==
+@@ -4759,6 +4871,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
+ 
+ bool VulkanCommandProcessor::IssueCopy() {
+   ++GetGpuFrameStats().resolves;
++  PassTraceAppend(" RESOLVE");
+ #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
+   SCOPE_profile_cpu_f("gpu");
+ #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+-- 
+2.43.0
+

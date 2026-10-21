@@ -1,0 +1,57 @@
+From 6c3fa8f333c34622a2936e87e1ce5ffc66c10ac0 Mon Sep 17 00:00:00 2001
+From: UAW Recomp <noreply@anthropic.com>
+Date: Sun, 18 Oct 2026 19:37:39 -0400
+Subject: [PATCH] gpu: gpu_force_msaa_1x_pitch to limit the MSAA override to
+ one render target
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ src/graphics/vulkan/command_processor.cpp | 24 ++++++++++++++++++++++-
+ 1 file changed, 23 insertions(+), 1 deletion(-)
+
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 6d0187f..0eacf56 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -75,6 +75,9 @@ REXCVAR_DEFINE_BOOL(gpu_force_msaa_1x, false, "GPU",
+                     "Render guest multisampled (2x/4x MSAA) render targets without MSAA. "
+                     "Much faster on mobile GPUs; edges are less smooth")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_INT32(gpu_force_msaa_1x_pitch, 0, "GPU",
++                     "With gpu_force_msaa_1x: only affect render targets with this surface "
++                     "pitch in pixels (0 = all multisampled render targets)");
+ REXCVAR_DEFINE_BOOL(vulkan_debug_msaa_experiment, false, "GPU",
+                     "Diagnostic only (breaks visuals): every 600 frames cycle between normal, "
+                     "1x1 scissor and skipped draws in 4x MSAA passes, logged as [gpu-exp]");
+@@ -2165,7 +2168,26 @@ void VulkanCommandProcessor::ShutdownContext() {
+ }
+ 
+ void VulkanCommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+-  if (index == XE_GPU_REG_RB_SURFACE_INFO && REXCVAR_GET(gpu_force_msaa_1x)) {
++  if (index == XE_GPU_REG_RB_SURFACE_INFO && (value & (uint32_t(3) << 16))) {
++    // Log each distinct multisampled surface setup once (for choosing
++    // gpu_force_msaa_1x_pitch).
++    static uint32_t seen[32];
++    static uint32_t seen_count = 0;
++    uint32_t key = value & 0x33FFF;
++    bool known = false;
++    for (uint32_t i = 0; i < seen_count; ++i) {
++      known |= seen[i] == key;
++    }
++    if (!known && seen_count < 32) {
++      seen[seen_count++] = key;
++      REXGPU_INFO("[gpu-msaa] guest MSAA surface: pitch={} samples={}", key & 0x3FFF,
++                  1u << ((key >> 16) & 3));
++    }
++  }
++  if (index == XE_GPU_REG_RB_SURFACE_INFO && REXCVAR_GET(gpu_force_msaa_1x) &&
++      (value & (uint32_t(3) << 16)) &&
++      (!REXCVAR_GET(gpu_force_msaa_1x_pitch) ||
++       int32_t(value & 0x3FFF) == REXCVAR_GET(gpu_force_msaa_1x_pitch))) {
+     // Treat every guest render target as single-sampled. Draws and resolves
+     // both read this register, so the EDRAM layout stays self-consistent;
+     // only the anti-aliasing is lost (4x less per-sample work on the host).
+-- 
+2.43.0
+

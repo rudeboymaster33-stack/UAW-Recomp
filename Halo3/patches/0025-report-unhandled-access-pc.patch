@@ -1,0 +1,107 @@
+From 2f1e8dcea9799b0c7ead9147aff5a7a504939d2d Mon Sep 17 00:00:00 2001
+From: Kylie <rudeboymaster33@gmail.com>
+Date: Mon, 19 Oct 2026 22:22:55 -0400
+Subject: [PATCH] system: report where unhandled guest accesses come from; cap
+ the log spam
+
+---
+ include/rex/system/mmio_handler.h |  1 +
+ src/system/mmio_handler.cpp       | 37 +++++++++++++++++++++++++++++--
+ src/system/xmemory.cpp            |  3 +++
+ 3 files changed, 39 insertions(+), 2 deletions(-)
+
+diff --git a/include/rex/system/mmio_handler.h b/include/rex/system/mmio_handler.h
+index 7ae42a8..0d6910f 100644
+--- a/include/rex/system/mmio_handler.h
++++ b/include/rex/system/mmio_handler.h
+@@ -74,6 +74,7 @@ class MMIOHandler {
+ 
+   static bool ExceptionCallbackThunk(arch::Exception* ex, void* data);
+   bool ExceptionCallback(arch::Exception* ex);
++  void ReportUnhandledAccess(arch::Exception* ex, uint32_t guest_address, bool is_write);
+ 
+   uint8_t* virtual_membase_;
+   uint8_t* physical_membase_;
+diff --git a/src/system/mmio_handler.cpp b/src/system/mmio_handler.cpp
+index 2b93005..b2058b1 100644
+--- a/src/system/mmio_handler.cpp
++++ b/src/system/mmio_handler.cpp
+@@ -21,6 +21,11 @@
+ #include <rex/system/mmio_handler.h>
+ #include <rex/types.h>
+ 
++#include <atomic>
++#if !defined(_WIN32)
++#include <dlfcn.h>
++#endif
++
+ using namespace rex::arch;
+ 
+ namespace rex::runtime {
+@@ -364,6 +369,30 @@ bool MMIOHandler::TryDecodeLoadStore(const uint8_t* p, DecodedLoadStore& decoded
+ #endif  // REX_ARCH
+ }
+ 
++// Where an unhandled guest access came from: the host code address, the
++// library it is in and the offset inside it (map the offset to a recompiled
++// function with the library's symbol table). Only the first few are reported.
++void MMIOHandler::ReportUnhandledAccess(arch::Exception* ex, uint32_t guest_address,
++                                        bool is_write) {
++  static std::atomic<uint32_t> reported{0};
++  if (reported.fetch_add(1, std::memory_order_relaxed) >= 8) {
++    return;
++  }
++  uintptr_t pc = static_cast<uintptr_t>(ex->pc());
++#if !defined(_WIN32)
++  Dl_info info{};
++  if (dladdr(reinterpret_cast<void*>(pc), &info) && info.dli_fname) {
++    REXLOG_ERROR("Unhandled guest {} of 0x{:08X}: host pc 0x{:X} = {} + 0x{:X} (near {})",
++                 is_write ? "write" : "read", guest_address, pc, info.dli_fname,
++                 pc - reinterpret_cast<uintptr_t>(info.dli_fbase),
++                 info.dli_sname ? info.dli_sname : "?");
++    return;
++  }
++#endif
++  REXLOG_ERROR("Unhandled guest {} of 0x{:08X}: host pc 0x{:X}", is_write ? "write" : "read",
++               guest_address, pc);
++}
++
+ bool MMIOHandler::ExceptionCallbackThunk(arch::Exception* ex, void* data) {
+   return reinterpret_cast<MMIOHandler*>(data)->ExceptionCallback(ex);
+ }
+@@ -417,8 +446,12 @@ bool MMIOHandler::ExceptionCallback(arch::Exception* ex) {
+     // The address is not found within any range, so either a write watch or an
+     // actual access violation.
+     if (access_violation_callback_) {
+-      return access_violation_callback_(std::move(lock), access_violation_callback_context_,
+-                                        fault_host_address, is_write);
++      bool handled = access_violation_callback_(std::move(lock), access_violation_callback_context_,
++                                                fault_host_address, is_write);
++      if (!handled) {
++        ReportUnhandledAccess(ex, fault_guest_virtual_address, is_write);
++      }
++      return handled;
+     }
+     return false;
+   }
+diff --git a/src/system/xmemory.cpp b/src/system/xmemory.cpp
+index 76cc877..6f06335 100644
+--- a/src/system/xmemory.cpp
++++ b/src/system/xmemory.cpp
+@@ -1,3 +1,4 @@
++#include <atomic>
+ /**
+  ******************************************************************************
+  * Xenia : Xbox 360 Emulator Research Project                                 *
+@@ -543,6 +544,8 @@ bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> glob
+   uint32_t virtual_address = HostToGuestVirtual(host_address);
+   BaseHeap* heap = LookupHeap(virtual_address);
+   if (!heap || heap->heap_type() != memory::HeapType::kGuestPhysical) {
++    static std::atomic<uint32_t> reported{0};
++    if (reported.fetch_add(1, std::memory_order_relaxed) < 20)
+     REXSYS_ERROR(
+         "Unhandled guest access violation: {} of guest 0x{:08X} (host 0x{:016X}) on thread 0x{:X}",
+         is_write ? "write" : "read", virtual_address, reinterpret_cast<uintptr_t>(host_address),
+-- 
+2.43.0
+

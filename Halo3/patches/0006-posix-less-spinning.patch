@@ -1,0 +1,93 @@
+diff --git a/src/core/threading_posix.cpp b/src/core/threading_posix.cpp
+index c54613a..29ba4e1 100644
+--- a/src/core/threading_posix.cpp
++++ b/src/core/threading_posix.cpp
+@@ -376,7 +376,9 @@ class PosixConditionBase {
+ 
+       if (!all_locked) {
+         locks.clear();
+-        std::this_thread::yield();
++        // Another thread holds one of the handles briefly; back off instead of
++        // spinning a core with yield().
++        std::this_thread::sleep_for(std::chrono::microseconds(50));
+         continue;
+       }
+ 
+@@ -423,8 +425,11 @@ class PosixConditionBase {
+       if (timeout == std::chrono::milliseconds::max()) {
+         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+       } else {
+-        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - now);
+-        auto sleep_time = std::min(remaining, std::chrono::milliseconds(1));
++        // Microsecond precision: with millisecond truncation the last
++        // millisecond before the deadline became a busy loop (sleep_for(0)).
++        auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(end_time - now);
++        auto sleep_time = std::clamp(remaining, std::chrono::microseconds(50),
++                                     std::chrono::microseconds(1000));
+         std::this_thread::sleep_for(sleep_time);
+       }
+     }
+diff --git a/src/core/timer_queue.cpp b/src/core/timer_queue.cpp
+index 5cfea05..7a756b3 100644
+--- a/src/core/timer_queue.cpp
++++ b/src/core/timer_queue.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include <algorithm>
+ #include <forward_list>
++#include <thread>
+ 
+ #include <disruptorplus/multi_threaded_claim_strategy.hpp>
+ #include <disruptorplus/ring_buffer.hpp>
+@@ -18,6 +19,7 @@
+ #include <disruptorplus/spin_wait_strategy.hpp>
+ 
+ #include <rex/assert.h>
++#include <rex/platform.h>
+ #include <rex/thread.h>
+ #include <rex/thread/timer_queue.h>
+ 
+@@ -65,11 +67,32 @@ class TimerQueue {
+     set_current_thread_name("rex::thread::TimerQueue");
+ 
+     while (!stop_token.stop_requested()) {
++#if REX_PLATFORM_ANDROID
++      {
++        // The spin wait below keeps a whole core busy (bad for a handheld's
++        // heat and the game threads). Sleep in 1 ms steps while the next timer
++        // is more than 2 ms away; new timers are picked up within ~1 ms and
++        // the final approach to a due time is still spin-precise.
++        auto now = clock::now();
++        auto due = wait_queue_.empty() ? now + std::chrono::milliseconds(10) : wait_queue_.front()->due_;
++        timer_far_ = due - now > std::chrono::milliseconds(2);
++        if (timer_far_) {
++          std::this_thread::sleep_for(std::chrono::milliseconds(1));
++        }
++      }
++#endif
+       {
+         // Consume new wait items and add them to sorted wait queue
+-        dp::sequence_t available = claim_strategy_.wait_until_published(
+-            next_sequence, next_sequence - 1,
+-            wait_queue_.empty() ? clock::time_point::max() : wait_queue_.front()->due_);
++        auto timeout = wait_queue_.empty() ? clock::time_point::max() : wait_queue_.front()->due_;
++#if REX_PLATFORM_ANDROID
++        // Far from the next due time: only check for newly queued timers, then
++        // go back to sleeping. Close to it: spin until due, as on desktop.
++        if (timer_far_) {
++          timeout = std::min(timeout, clock::now() + std::chrono::microseconds(100));
++        }
++#endif
++        dp::sequence_t available =
++            claim_strategy_.wait_until_published(next_sequence, next_sequence - 1, timeout);
+ 
+         // Check for timeout
+         if (available != next_sequence - 1) {
+@@ -149,6 +172,7 @@ class TimerQueue {
+   // This is a _sorted_ (ascending due_) list of active timers managed by a
+   // dedicated thread
+   std::forward_list<std::shared_ptr<WaitItem>> wait_queue_;
++  bool timer_far_ = false;
+   std::jthread dispatch_thread_;
+ };
+ 

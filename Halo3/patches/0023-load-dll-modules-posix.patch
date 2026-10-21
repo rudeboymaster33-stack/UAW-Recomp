@@ -1,0 +1,75 @@
+From 3a19dfeb1d2d4c2fc43ad1313b12265d12622ec7 Mon Sep 17 00:00:00 2001
+From: Kylie <rudeboymaster33@gmail.com>
+Date: Mon, 19 Oct 2026 22:06:04 -0400
+Subject: [PATCH] system: load recompiled guest DLL modules as lib<name>.so on
+ Linux/Android
+
+---
+ src/system/kernel_state.cpp | 44 ++++++++++++++++++++++++++++++++++---
+ 1 file changed, 41 insertions(+), 3 deletions(-)
+
+diff --git a/src/system/kernel_state.cpp b/src/system/kernel_state.cpp
+index 697399c..d21bcc7 100644
+--- a/src/system/kernel_state.cpp
++++ b/src/system/kernel_state.cpp
+@@ -43,6 +43,37 @@
+ #include <rex/system/xthread.h>
+ #include <rex/system/xtimer.h>
+ 
++#if !defined(_WIN32)
++#include <dlfcn.h>
++#endif
++
++namespace {
++// Recompiled guest DLL modules are registered by bare target name
++// (e.g. "halo3_waveshell-xbox"). LoadLibrary adds ".dll" on Windows; dlopen
++// needs the real file name, so on Linux/Android look for lib<name>.so next to
++// the runtime library (the app's native library folder on Android).
++std::filesystem::path ResolveModuleLibraryPath(const std::string& name) {
++  std::filesystem::path p(name);
++#if defined(_WIN32)
++  return p;
++#else
++  if (p.has_parent_path() || p.extension() == ".so") {
++    return p;
++  }
++  std::string file = "lib" + name + ".so";
++  Dl_info info{};
++  if (dladdr(reinterpret_cast<const void*>(&ResolveModuleLibraryPath), &info) && info.dli_fname) {
++    auto candidate = std::filesystem::path(info.dli_fname).parent_path() / file;
++    std::error_code ec;
++    if (std::filesystem::exists(candidate, ec)) {
++      return candidate;
++    }
++  }
++  return std::filesystem::path(file);
++#endif
++}
++}  // namespace
++
+ namespace rex::system {
+ 
+ constexpr uint32_t kDeferredOverlappedDelayMillis = 100;
+@@ -759,9 +790,16 @@ object_ref<UserModule> KernelState::LoadUserModule(const std::string_view raw_na
+     }
+ 
+     rex::platform::DynamicLibrary library_local;
+-    if (!library_local.Load(std::filesystem::path(recomp->shared_lib_name),
+-                            rex::platform::SymbolResolution::kImmediate)) {
+-      REXSYS_ERROR("Failed to load shared library for module '{}'", recomp->pe_name);
++    auto lib_path = ResolveModuleLibraryPath(recomp->shared_lib_name);
++    if (!library_local.Load(lib_path, rex::platform::SymbolResolution::kImmediate)) {
++#if !defined(_WIN32)
++      const char* dl_err = dlerror();
++      REXSYS_ERROR("Failed to load shared library for module '{}' ({}): {}", recomp->pe_name,
++                   lib_path.string(), dl_err ? dl_err : "unknown error");
++#else
++      REXSYS_ERROR("Failed to load shared library for module '{}' ({})", recomp->pe_name,
++                   lib_path.string());
++#endif
+     } else {
+       auto register_func = reinterpret_cast<runtime::FunctionDispatcher::RegisterFn>(
+           library_local.GetRawSymbol("ReXModule_Register"));
+-- 
+2.43.0
+

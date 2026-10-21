@@ -1,0 +1,49 @@
+From 82c2f38af308e6d43b122644380dec65f7e2462f Mon Sep 17 00:00:00 2001
+From: Kylie <rudeboymaster33@gmail.com>
+Date: Tue, 20 Oct 2026 21:24:08 -0400
+Subject: [PATCH] vulkan: gpu_debug_mem_probe - summarise named guest memory
+ ranges in the traced frame
+
+---
+ src/graphics/vulkan/command_processor.cpp | 24 +++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index f089c41..d2a86e5 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -3732,7 +3732,31 @@ void VulkanCommandProcessor::PassTraceFlushDraws() {
+   }
+ }
+ 
++REXCVAR_DEFINE_STRING(gpu_debug_mem_probe, "", "GPU",
++                      "Diagnostic: comma-separated hex address:bytes ranges of guest memory to "
++                      "summarise at the end of each traced frame ([gpu-dt] MEM)");
++
+ void VulkanCommandProcessor::DTraceSummariseResolves() {
++  {
++    // Extra ranges requested with gpu_debug_mem_probe.
++    std::string probes = REXCVAR_GET(gpu_debug_mem_probe);
++    size_t pos = 0;
++    while (!probes.empty() && pos < probes.size()) {
++      size_t comma = probes.find(',', pos);
++      std::string item = probes.substr(pos, comma == std::string::npos ? std::string::npos
++                                                                        : comma - pos);
++      size_t colon = item.find(':');
++      if (colon != std::string::npos) {
++        uint32_t paddr = uint32_t(std::strtoul(item.substr(0, colon).c_str(), nullptr, 16));
++        uint32_t pbytes = uint32_t(std::strtoul(item.substr(colon + 1).c_str(), nullptr, 0));
++        dtrace_resolves_.emplace_back(paddr, pbytes);
++      }
++      if (comma == std::string::npos) {
++        break;
++      }
++      pos = comma + 1;
++    }
++  }
+   // Summarise what each resolve destination holds in guest memory now (only
+   // meaningful with readback_resolve=full, where resolves are read back).
+   std::vector<std::pair<uint32_t, uint32_t>> seen;
+-- 
+2.43.0
+

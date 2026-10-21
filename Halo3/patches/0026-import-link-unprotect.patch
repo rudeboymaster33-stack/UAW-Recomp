@@ -1,0 +1,36 @@
+From 59b1bac555d074f6dc511b43928c2c8e4379ad4e Mon Sep 17 00:00:00 2001
+From: Kylie <rudeboymaster33@gmail.com>
+Date: Mon, 19 Oct 2026 22:32:31 -0400
+Subject: [PATCH] system: open the read-only import table page while linking
+ DLL-to-DLL imports
+
+---
+ src/system/kernel_state.cpp | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/src/system/kernel_state.cpp b/src/system/kernel_state.cpp
+index 34ce459..d8ab46a 100644
+--- a/src/system/kernel_state.cpp
++++ b/src/system/kernel_state.cpp
+@@ -802,7 +802,18 @@ object_ref<UserModule> KernelState::LoadUserModule(const std::string_view raw_na
+                       imp.ordinal, lib.name);
+           continue;
+         }
++        // The import table lives in read-only data, which is already
++        // protected at this point: open the page for the write, then restore.
++        auto* heap = memory()->LookupHeap(imp.value_address);
++        uint32_t old_protect = 0;
++        bool reprotect = heap && heap->QueryProtect(imp.value_address, &old_protect) &&
++                         !(old_protect & memory::kMemoryProtectWrite) &&
++                         heap->Protect(imp.value_address, 4,
++                                       memory::kMemoryProtectRead | memory::kMemoryProtectWrite);
+         *memory()->TranslateVirtual<rex::be<uint32_t>*>(imp.value_address) = target;
++        if (reprotect) {
++          heap->Protect(imp.value_address, 4, old_protect);
++        }
+         ++patched;
+       }
+       REXSYS_INFO("LoadUserModule: '{}' linked {} imports from '{}'", module->name(), patched,
+-- 
+2.43.0
+
