@@ -1,0 +1,34 @@
+From 7c1fb22248ad15efe5dce3b3156b137b4103515d Mon Sep 17 00:00:00 2001
+From: UAW Recomp <noreply@anthropic.com>
+Date: Mon, 19 Oct 2026 21:14:47 -0400
+Subject: [PATCH] ui/android: enable FSR 1 and CAS output effects (prebuilt
+ SPIR-V, no FidelityFX runtime needed)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ include/rex/ui/presenter.h | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/include/rex/ui/presenter.h b/include/rex/ui/presenter.h
+index afb4a30..f1904e0 100644
+--- a/include/rex/ui/presenter.h
++++ b/include/rex/ui/presenter.h
+@@ -47,6 +47,14 @@
+ #include <wrl/client.h>
+ #endif  // XE_PLATFORM
+ 
++// On Android, enable the shader-based AMD FidelityFX effects (FSR 1 upscaling
++// and CAS sharpening, prebuilt SPIR-V in src/ui/shaders) without the
++// FidelityFX SDK runtime, which only the temporal FSR 2/3 paths need. Defined
++// here so every target sees the same class layout.
++#if defined(__ANDROID__) && !defined(REX_HAS_FIDELITYFX_SDK)
++#define REX_HAS_FIDELITYFX_SDK 1
++#endif
++
+ namespace rex {
+ namespace ui {
+ 
+-- 
+2.43.0
+

@@ -1,0 +1,15 @@
+diff --git a/src/kernel/xam/xam_user.cpp b/src/kernel/xam/xam_user.cpp
+--- a/src/kernel/xam/xam_user.cpp
++++ b/src/kernel/xam/xam_user.cpp
+@@ -272,6 +272,11 @@ uint32_t XamUserReadProfileSettingsEx(uint32_t title_id, uint32_t user_index, ui
+ 
+     if (setting && setting->is_set) {
+       setting->Append(&out_setting->data, &out_stream);
++    } else if (setting) {
++      // Real XAM reports the setting's data type even when no value is stored
++      // (e.g. an unset title-specific setting is BINARY with size 0 / ptr 0).
++      // Games such as Universe at War treat type 0 here as corrupt data.
++      out_setting->data.type = static_cast<uint8_t>(setting->type);
+     }
+     ++out_setting;
+   }

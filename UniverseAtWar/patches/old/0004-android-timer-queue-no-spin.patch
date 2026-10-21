@@ -1,0 +1,106 @@
+diff --git a/src/core/timer_queue.cpp b/src/core/timer_queue.cpp
+index 5cfea05..90692b4 100644
+--- a/src/core/timer_queue.cpp
++++ b/src/core/timer_queue.cpp
+@@ -15,7 +15,10 @@
+ #include <disruptorplus/multi_threaded_claim_strategy.hpp>
+ #include <disruptorplus/ring_buffer.hpp>
+ #include <disruptorplus/sequence_barrier.hpp>
++#include <condition_variable>
++#include <mutex>
+ #include <disruptorplus/spin_wait_strategy.hpp>
++#include <rex/platform.h>
+ 
+ #include <rex/assert.h>
+ #include <rex/thread.h>
+@@ -27,6 +30,60 @@ namespace rex::thread {
+ 
+ using WaitItem = TimerQueueWaitItem;
+ 
++#if REX_PLATFORM_ANDROID
++// Condition-variable wait strategy (disruptorplus's blocking_wait_strategy
++// passes wait_until/wait_for arguments in the wrong order and does not compile).
++class CvWaitStrategy {
++ public:
++  dp::sequence_t wait_until_published(dp::sequence_t sequence, size_t count,
++                                      const std::atomic<dp::sequence_t>* const sequences[]) {
++    dp::sequence_t result;
++    std::unique_lock<std::mutex> lock(mutex_);
++    cv_.wait(lock, [&] {
++      result = dp::minimum_sequence_after(sequence, count, sequences);
++      return dp::difference(result, sequence) >= 0;
++    });
++    return result;
++  }
++  template <typename Rep, typename Period>
++  dp::sequence_t wait_until_published(dp::sequence_t sequence, size_t count,
++                                      const std::atomic<dp::sequence_t>* const sequences[],
++                                      const std::chrono::duration<Rep, Period>& timeout) {
++    return wait_until_published(sequence, count, sequences,
++                                std::chrono::steady_clock::now() + timeout);
++  }
++  template <typename Clock, typename Duration>
++  dp::sequence_t wait_until_published(dp::sequence_t sequence, size_t count,
++                                      const std::atomic<dp::sequence_t>* const sequences[],
++                                      const std::chrono::time_point<Clock, Duration>& timeout_time) {
++    dp::sequence_t result;
++    std::unique_lock<std::mutex> lock(mutex_);
++    cv_.wait_until(lock, timeout_time, [&] {
++      result = dp::minimum_sequence_after(sequence, count, sequences);
++      return dp::difference(result, sequence) >= 0;
++    });
++    return result;
++  }
++  void signal_all_when_blocking() {
++    std::unique_lock<std::mutex> lock(mutex_);
++    cv_.notify_all();
++  }
++
++ private:
++  std::mutex mutex_;
++  std::condition_variable cv_;
++};
++
++// The spin strategy keeps a whole CPU core busy (about a third of a core even
++// when idle); on a handheld that costs heat and throttles the game threads.
++// A condition-variable wait is precise enough on Linux kernels.
++using TimerWaitStrategy = CvWaitStrategy;
++constexpr bool kTimerQueueBlocking = true;
++#else
++using TimerWaitStrategy = dp::spin_wait_strategy;
++constexpr bool kTimerQueueBlocking = false;
++#endif
++
+ class TimerQueue {
+  public:
+   using clock = WaitItem::clock;
+@@ -67,9 +124,13 @@ class TimerQueue {
+     while (!stop_token.stop_requested()) {
+       {
+         // Consume new wait items and add them to sorted wait queue
+-        dp::sequence_t available = claim_strategy_.wait_until_published(
+-            next_sequence, next_sequence - 1,
+-            wait_queue_.empty() ? clock::time_point::max() : wait_queue_.front()->due_);
++        auto timeout = wait_queue_.empty() ? clock::time_point::max() : wait_queue_.front()->due_;
++        if constexpr (kTimerQueueBlocking) {
++          // Bound condition-variable waits: time_point::max() overflows clock conversions.
++          timeout = std::min(timeout, clock::now() + std::chrono::milliseconds(100));
++        }
++        dp::sequence_t available =
++            claim_strategy_.wait_until_published(next_sequence, next_sequence - 1, timeout);
+ 
+         // Check for timeout
+         if (available != next_sequence - 1) {
+@@ -142,9 +203,9 @@ class TimerQueue {
+   // This ring buffer will be used to introduce timers queued by the public API
+   static constexpr size_t kWaitCount = 512;
+   dp::ring_buffer<std::shared_ptr<WaitItem>> buffer_;
+-  dp::spin_wait_strategy wait_strategy_;
+-  dp::multi_threaded_claim_strategy<dp::spin_wait_strategy> claim_strategy_;
+-  dp::sequence_barrier<dp::spin_wait_strategy> consumed_;
++  TimerWaitStrategy wait_strategy_;
++  dp::multi_threaded_claim_strategy<TimerWaitStrategy> claim_strategy_;
++  dp::sequence_barrier<TimerWaitStrategy> consumed_;
+ 
+   // This is a _sorted_ (ascending due_) list of active timers managed by a
+   // dedicated thread
