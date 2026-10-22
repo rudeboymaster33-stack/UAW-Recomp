@@ -1,0 +1,64 @@
+From 7486ca4484a6da82b43620f1086a16ba7395714e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 19:30:12 -0400
+Subject: [PATCH] vulkan: gpu_depth_equal_relax option; depth state in the
+ [gpu-dt] DRAW line
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ src/graphics/vulkan/command_processor.cpp | 18 ++++++++++++++++--
+ 1 file changed, 16 insertions(+), 2 deletions(-)
+
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index a158a1a..4b06227 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -91,6 +91,10 @@ REXCVAR_DEFINE_BOOL(gpu_debug_dump_resolves, false, "GPU",
+                     "result of every resolve of the first traced frame to the dump folder");
+ REXCVAR_DEFINE_BOOL(gpu_debug_depth_always, false, "GPU",
+                     "Diagnostic only (breaks visuals): make every depth test pass");
++REXCVAR_DEFINE_INT32(gpu_depth_equal_relax, 0, "GPU",
++                     "Turn guest EQUAL depth tests into LESS_EQUAL (1) or GREATER_EQUAL (2) when "
++                     "depth writes are off, for games that redraw geometry with an equal test and "
++                     "lose it to tiny position differences between vertex shaders (0 = off)");
+ REXCVAR_DEFINE_BOOL(gpu_debug_stencil_off, false, "GPU",
+                     "Diagnostic only (breaks visuals): disable the stencil test");
+ REXCVAR_DEFINE_BOOL(vulkan_gpu_timestamps, false, "GPU",
+@@ -4356,6 +4360,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+   if (REXCVAR_GET(gpu_debug_stencil_off)) {
+     normalized_depth_control.stencil_enable = 0;
+   }
++  const xenos::CompareFunction guest_zfunc = normalized_depth_control.zfunc;
++  if (REXCVAR_GET(gpu_depth_equal_relax) && normalized_depth_control.z_enable &&
++      !normalized_depth_control.z_write_enable &&
++      normalized_depth_control.zfunc == xenos::CompareFunction::kEqual) {
++    normalized_depth_control.zfunc = REXCVAR_GET(gpu_depth_equal_relax) == 2
++                                         ? xenos::CompareFunction::kGreaterEqual
++                                         : xenos::CompareFunction::kLessEqual;
++  }
+ 
+   if (guest_zpd_query_open_) {
+     GpuFrameStats& qst = GetGpuFrameStats();
+@@ -4412,14 +4424,16 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+       const PrimitiveProcessor::ProcessingResult& pr = primitive_processing_result;
+       REXGPU_INFO(
+           "[gpu-dt] DRAW prim={}->{} n={} guest={} host={} ib={} fmt={} reset={} tess={} "
+-          "vs={:016X} ps={:016X} t0={:08X} vf0={:08X}",
++          "vs={:016X} ps={:016X} t0={:08X} vf0={:08X} z={}{} zf={} st={}",
+           uint32_t(prim_type), uint32_t(pr.host_primitive_type), index_count,
+           pr.guest_draw_vertex_count, pr.host_draw_vertex_count, uint32_t(pr.index_buffer_type),
+           uint32_t(pr.host_index_format), int(pr.host_primitive_reset_enabled),
+           uint32_t(pr.host_vertex_shader_type), vertex_shader->ucode_data_hash(),
+           pixel_shader ? pixel_shader->ucode_data_hash() : 0,
+           uint32_t(regs.GetTextureFetch(0).base_address) << 12,
+-          regs.GetVertexFetch(0).address << 2);
++          regs.GetVertexFetch(0).address << 2, int(normalized_depth_control.z_enable),
++          int(normalized_depth_control.z_write_enable), uint32_t(guest_zfunc),
++          int(normalized_depth_control.stencil_enable));
+     }
+     if (!primitive_processing_result.host_draw_vertex_count) {
+       // Nothing to draw.
+-- 
+2.43.0
+

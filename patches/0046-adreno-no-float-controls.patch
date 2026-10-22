@@ -1,0 +1,61 @@
+From b95cfea4e1f34e42a93e07b19e270123eb89779a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 20:50:52 -0400
+Subject: [PATCH] spirv: never use float controls on the Qualcomm proprietary
+ driver - they make gl_FragCoord read 0
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ .../pipeline/shader/spirv_translator.cpp      | 19 +++++++++++++++----
+ 1 file changed, 15 insertions(+), 4 deletions(-)
+
+diff --git a/src/graphics/pipeline/shader/spirv_translator.cpp b/src/graphics/pipeline/shader/spirv_translator.cpp
+index 0b0ad01..504b821 100644
+--- a/src/graphics/pipeline/shader/spirv_translator.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator.cpp
+@@ -29,7 +29,8 @@
+ 
+ REXCVAR_DEFINE_BOOL(vulkan_spirv_float_controls, true, "GPU/Vulkan",
+                     "Use SPIR-V float controls execution modes (denorm flush, signed zero / "
+-                    "inf / nan preserve, RTE rounding) when the device supports them");
++                    "inf / nan preserve, RTE rounding) when the device supports them. Always off "
++                    "on the Qualcomm proprietary driver, where they make gl_FragCoord read 0");
+ REXCVAR_DEFINE_BOOL(vulkan_spirv_sample_rate_shading, true, "GPU/Vulkan",
+                     "Allow SPIR-V sample rate shading features when the device supports them");
+ REXCVAR_DEFINE_INT32(vulkan_spirv_max_version, 0, "GPU/Vulkan",
+@@ -53,6 +54,16 @@ SpirvShaderTranslator::Features::Features(bool all)
+       demote_to_helper_invocation(all),
+       sample_rate_shading(all) {}
+ 
++namespace {
++// The Qualcomm proprietary driver (seen on Adreno 740, driver build 12/2023)
++// returns 0 from gl_FragCoord in fragment shaders that use the float controls
++// execution modes, which breaks every shader that uses the pixel position.
++bool UseSpirvFloatControls(const ui::vulkan::VulkanDevice* const vulkan_device) {
++  return REXCVAR_GET(vulkan_spirv_float_controls) &&
++         vulkan_device->properties().driverID != VK_DRIVER_ID_QUALCOMM_PROPRIETARY;
++}
++}  // namespace
++
+ SpirvShaderTranslator::Features::Features(const ui::vulkan::VulkanDevice* const vulkan_device)
+     : max_storage_buffer_range(vulkan_device->properties().maxStorageBufferRange),
+       full_draw_index_uint32(vulkan_device->properties().fullDrawIndexUint32),
+@@ -64,11 +75,11 @@ SpirvShaderTranslator::Features::Features(const ui::vulkan::VulkanDevice* const
+       image_view_format_swizzle(vulkan_device->properties().imageViewFormatSwizzle),
+       signed_zero_inf_nan_preserve_float32(
+           vulkan_device->properties().shaderSignedZeroInfNanPreserveFloat32 &&
+-          REXCVAR_GET(vulkan_spirv_float_controls)),
++          UseSpirvFloatControls(vulkan_device)),
+       denorm_flush_to_zero_float32(vulkan_device->properties().shaderDenormFlushToZeroFloat32 &&
+-                                   REXCVAR_GET(vulkan_spirv_float_controls)),
++                                   UseSpirvFloatControls(vulkan_device)),
+       rounding_mode_rte_float32(vulkan_device->properties().shaderRoundingModeRTEFloat32 &&
+-                                REXCVAR_GET(vulkan_spirv_float_controls)),
++                                UseSpirvFloatControls(vulkan_device)),
+       fragment_shader_sample_interlock(vulkan_device->properties().fragmentShaderSampleInterlock),
+       demote_to_helper_invocation(vulkan_device->properties().shaderDemoteToHelperInvocation &&
+                                   REXCVAR_GET(vulkan_shader_demote)),
+-- 
+2.43.0
+

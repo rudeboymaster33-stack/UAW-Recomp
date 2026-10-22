@@ -47,10 +47,9 @@ public class Halo3Activity extends SDLActivity {
         // Halo 3 uses texture fetch constants with an "invalid" type for some of its
         // textures (menu background, effects); accept them like the console does.
         args.add("--gpu_allow_invalid_fetch_constants=true");
-        // Halo 3's camera motion blur (pixel shader 87021CCA423D6960) smears the
-        // whole picture into one colour on this GPU path; skip it until the
-        // underlying translation issue is fixed.
-        args.add("--gpu_skip_pixel_shaders=87021CCA423D6960");
+        // Halo 3 renders to 8_8_8_8_GAMMA targets and expects real 8-bit storage;
+        // the 16-bit emulation of them makes the menu scene far too bright.
+        args.add("--gamma_render_target_as_unorm16=false");
         // Evenly paced frames: FIFO presentation (VK_GOOGLE_display_timing).
         args.add("--vulkan_allow_present_mode_immediate=false");
         args.add("--vulkan_allow_present_mode_mailbox=false");

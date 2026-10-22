@@ -1,0 +1,87 @@
+From 507916b5df37481d0e5d386b66f4a4211673053c Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 20:17:45 -0400
+Subject: [PATCH] spirv: gpu_debug_ps_position_out diagnostic - output pixel
+ position from listed pixel shaders
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ .../pipeline/shader/spirv_translator_rb.cpp   | 49 +++++++++++++++++++
+ 1 file changed, 49 insertions(+)
+
+diff --git a/src/graphics/pipeline/shader/spirv_translator_rb.cpp b/src/graphics/pipeline/shader/spirv_translator_rb.cpp
+index 765c141..0d68769 100644
+--- a/src/graphics/pipeline/shader/spirv_translator_rb.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator_rb.cpp
+@@ -16,11 +16,19 @@
+ #include <SPIRV/GLSL.std.450.h>
+ 
+ #include <rex/assert.h>
++#include <rex/cvar.h>
++#include <string>
++#include <fmt/format.h>
+ #include <rex/graphics/pipeline/render_target/cache.h>
+ #include <rex/graphics/pipeline/shader/spirv_translator.h>
+ #include <rex/graphics/util/draw.h>
+ #include <rex/math.h>
+ 
++REXCVAR_DEFINE_STRING(gpu_debug_ps_position_out, "", "GPU",
++                      "Diagnostic only (breaks visuals): for the listed guest pixel shader hashes, "
++                      "write the pixel position instead of the colors: R = ps_param_gen x / 2048, "
++                      "G = ps_param_gen y / 2048, B = host FragCoord x / 2048, A = FragCoord y / 2048");
++
+ namespace rex::graphics {
+ 
+ spv::Id SpirvShaderTranslator::PreClampedFloat32To7e3(SpirvBuilder& builder, spv::Id f32_scalar,
+@@ -395,6 +403,47 @@ spv::Id SpirvShaderTranslator::Depth20e4To32(SpirvBuilder& builder, spv::Id f24_
+ }
+ 
+ void SpirvShaderTranslator::CompleteFragmentShaderInMain() {
++  if (!edram_fragment_shader_interlock_) {
++    const std::string& debug_list = REXCVAR_GET(gpu_debug_ps_position_out);
++    if (!debug_list.empty() &&
++        debug_list.find(fmt::format("{:016X}", current_shader().ucode_data_hash())) !=
++            std::string::npos) {
++      spv::Id scale = builder_->makeFloatConstant(1.0f / 2048.0f);
++      spv::Id pg_x = const_float_0_, pg_y = const_float_0_;
++      uint32_t pg_index = GetPsParamGenInterpolator();
++      if (pg_index != UINT32_MAX) {
++        id_vector_temp_.clear();
++        id_vector_temp_.push_back(builder_->makeIntConstant(int(pg_index)));
++        spv::Id pg = builder_->createLoad(
++            builder_->createAccessChain(spv::StorageClassFunction, var_main_registers_,
++                                        id_vector_temp_),
++            spv::NoPrecision);
++        pg_x = builder_->createUnaryBuiltinCall(
++            type_float_, ext_inst_glsl_std_450_, GLSLstd450FAbs,
++            builder_->createCompositeExtract(pg, type_float_, 0));
++        pg_y = builder_->createUnaryBuiltinCall(
++            type_float_, ext_inst_glsl_std_450_, GLSLstd450FAbs,
++            builder_->createCompositeExtract(pg, type_float_, 1));
++      }
++      spv::Id fc_x = const_float_0_, fc_y = const_float_0_;
++      if (input_fragment_coordinates_ != spv::NoResult) {
++        spv::Id fc = builder_->createLoad(input_fragment_coordinates_, spv::NoPrecision);
++        fc_x = builder_->createCompositeExtract(fc, type_float_, 0);
++        fc_y = builder_->createCompositeExtract(fc, type_float_, 1);
++      }
++      id_vector_temp_.clear();
++      id_vector_temp_.push_back(builder_->createBinOp(spv::OpFMul, type_float_, pg_x, scale));
++      id_vector_temp_.push_back(builder_->createBinOp(spv::OpFMul, type_float_, pg_y, scale));
++      id_vector_temp_.push_back(builder_->createBinOp(spv::OpFMul, type_float_, fc_x, scale));
++      id_vector_temp_.push_back(builder_->createBinOp(spv::OpFMul, type_float_, fc_y, scale));
++      spv::Id debug_color = builder_->createCompositeConstruct(type_float4_, id_vector_temp_);
++      for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
++        if (output_or_var_fragment_data_[i] != spv::NoResult) {
++          builder_->createStore(debug_color, output_or_var_fragment_data_[i]);
++        }
++      }
++    }
++  }
+   // Loaded if needed.
+   spv::Id msaa_samples = spv::NoResult;
+ 
+-- 
+2.43.0
+

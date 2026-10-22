@@ -1,0 +1,2 @@
+#wait=70
+--gamma_render_target_as_unorm16=false
