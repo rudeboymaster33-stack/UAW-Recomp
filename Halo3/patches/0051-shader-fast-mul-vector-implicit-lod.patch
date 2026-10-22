@@ -1,0 +1,80 @@
+From e14c82c09500e0403842689e08ecf19f35f4215b Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 22:21:03 -0400
+Subject: [PATCH] spirv: fast multiply also covers vector mul/mad;
+ gpu_shader_implicit_lod - hardware LOD + bias instead of explicit gradients
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ .../pipeline/shader/spirv_translator_alu.cpp  |  2 +-
+ .../shader/spirv_translator_fetch.cpp         | 22 ++++++++++++++++---
+ 2 files changed, 20 insertions(+), 4 deletions(-)
+
+diff --git a/src/graphics/pipeline/shader/spirv_translator_alu.cpp b/src/graphics/pipeline/shader/spirv_translator_alu.cpp
+index a41ab6b..35bde4e 100644
+--- a/src/graphics/pipeline/shader/spirv_translator_alu.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator_alu.cpp
+@@ -204,7 +204,7 @@ spv::Id SpirvShaderTranslator::ProcessVectorAluOperation(
+       uint32_t multiplicands_different =
+           used_result_components &
+           ~instr.vector_operands[0].GetIdenticalComponents(instr.vector_operands[1]);
+-      if (multiplicands_different) {
++      if (multiplicands_different && !REXCVAR_GET(gpu_shader_fast_multiply)) {
+         // Shader Model 3: +0 or denormal * anything = +-0.
+         spv::Id different_operands[2] = {multiplicands[0], multiplicands[1]};
+         spv::Id different_result = result;
+diff --git a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
+index 9ce3bb4..cf5be05 100644
+--- a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
+@@ -19,9 +19,15 @@
+ #include <fmt/format.h>
+ 
+ #include <rex/assert.h>
++#include <rex/cvar.h>
+ #include <rex/graphics/pipeline/shader/spirv_translator.h>
+ #include <rex/math.h>
+ 
++REXCVAR_DEFINE_BOOL(gpu_shader_implicit_lod, false, "GPU/Shader",
++                    "In pixel shaders, sample 2D and cube textures with hardware-computed LOD "
++                    "plus a bias instead of explicit gradients (faster on mobile GPUs; mip "
++                    "selection can differ slightly in rare guest control flow)");
++
+ namespace rex::graphics {
+ 
+ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
+@@ -1837,9 +1843,19 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
+           sample_result_signed =
+               if_data_is_3d.createMergePhi(sample_result_signed_3d, sample_result_signed_stacked);
+         } else {
++          spv::ImageOperandsMask image_operands_mask_2d = image_operands_mask;
+           if (use_computed_lod) {
+-            texture_parameters.gradX = gradients_h;
+-            texture_parameters.gradY = gradients_v;
++            if (REXCVAR_GET(gpu_shader_implicit_lod) && is_pixel_shader() &&
++                !instr.attributes.use_register_gradients) {
++              // Let the hardware compute the LOD from the implicit derivatives
++              // and apply the guest LOD bias as a bias, instead of sampling
++              // with explicit, pre-scaled gradients (slower on mobile GPUs).
++              texture_parameters.bias = lod;
++              image_operands_mask_2d = spv::ImageOperandsMaskNone;
++            } else {
++              texture_parameters.gradX = gradients_h;
++              texture_parameters.gradY = gradients_v;
++            }
+           }
+           id_vector_temp_.clear();
+           for (uint32_t i = 0; i < 3; ++i) {
+@@ -1847,7 +1863,7 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
+           }
+           texture_parameters.coords =
+               builder_->createCompositeConstruct(type_float3_, id_vector_temp_);
+-          SampleTexture(texture_parameters, image_operands_mask, image_2d_array_or_cube_unsigned,
++          SampleTexture(texture_parameters, image_operands_mask_2d, image_2d_array_or_cube_unsigned,
+                         image_2d_array_or_cube_signed, sampler, is_any_unsigned, is_any_signed,
+                         sample_result_unsigned, sample_result_signed);
+         }
+-- 
+2.43.0
+

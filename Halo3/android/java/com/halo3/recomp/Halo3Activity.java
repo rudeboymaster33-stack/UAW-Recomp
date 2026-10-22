@@ -59,6 +59,8 @@ public class Halo3Activity extends SDLActivity {
         // Plain multiplies in translated shaders instead of emulating the Xbox 360
         // "0 * anything = 0" rule: about +25% on the menu, no visible difference.
         args.add("--gpu_shader_fast_multiply=true");
+        // Hardware texture LOD + bias instead of explicit gradients: about +5%.
+        args.add("--gpu_shader_implicit_lod=true");
         // Evenly paced frames: FIFO presentation (VK_GOOGLE_display_timing).
         args.add("--vulkan_allow_present_mode_immediate=false");
         args.add("--vulkan_allow_present_mode_mailbox=false");
