@@ -1,0 +1,39 @@
+From 381abc3dd5c37313c30bd6abc636b6d1158e2cc6 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 22:28:54 -0400
+Subject: [PATCH] spirv: vector multiply fast path behind its own
+ gpu_shader_fast_vector_multiply switch (off)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ src/graphics/pipeline/shader/spirv_translator_alu.cpp | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/src/graphics/pipeline/shader/spirv_translator_alu.cpp b/src/graphics/pipeline/shader/spirv_translator_alu.cpp
+index 35bde4e..12bc212 100644
+--- a/src/graphics/pipeline/shader/spirv_translator_alu.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator_alu.cpp
+@@ -26,6 +26,10 @@ REXCVAR_DEFINE_BOOL(gpu_shader_fast_multiply, false, "GPU/Shader",
+                     "emulating the Xbox 360 rule that 0 * anything = 0 (faster, but infinity or "
+                     "NaN can appear where the console would have produced 0)");
+ 
++REXCVAR_DEFINE_BOOL(gpu_shader_fast_vector_multiply, false, "GPU/Shader",
++                    "Like gpu_shader_fast_multiply, but also for vector mul/mad (breaks Halo 3: "
++                    "white screen from an effect that relies on 0 * infinity = 0)");
++
+ namespace rex::graphics {
+ 
+ spv::Id SpirvShaderTranslator::ZeroIfAnyOperandIsZero(spv::Id value, spv::Id operand_0_abs,
+@@ -204,7 +208,7 @@ spv::Id SpirvShaderTranslator::ProcessVectorAluOperation(
+       uint32_t multiplicands_different =
+           used_result_components &
+           ~instr.vector_operands[0].GetIdenticalComponents(instr.vector_operands[1]);
+-      if (multiplicands_different && !REXCVAR_GET(gpu_shader_fast_multiply)) {
++      if (multiplicands_different && !REXCVAR_GET(gpu_shader_fast_vector_multiply)) {
+         // Shader Model 3: +0 or denormal * anything = +-0.
+         spv::Id different_operands[2] = {multiplicands[0], multiplicands[1]};
+         spv::Id different_result = result;
+-- 
+2.43.0
+
