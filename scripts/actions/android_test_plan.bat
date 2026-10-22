@@ -31,6 +31,8 @@ echo [%TIME%] Run %N% of %COUNT%: %~2 (%WAITS% s)
 "%ADB%" push "%~1" %PKGDIR%/args.txt >nul 2>&1
 if exist "%ROOT%scripts\android_test_env.txt" "%ADB%" push "%ROOT%scripts\android_test_env.txt" %PKGDIR%/env.txt >nul 2>&1
 "%ADB%" logcat -c
+"%ADB%" push "%ROOT%scripts\android_monitor.sh" /data/local/tmp/halo3_mon.sh >nul 2>&1
+start "Retroid monitor" /min cmd /c ""%ADB%" shell sh /data/local/tmp/halo3_mon.sh > "%OUT%\%~2_gpu.txt" 2>&1 < nul"
 "%ADB%" shell am start -n %PKG%/.Halo3Activity >nul
 timeout /t %HALF% /nobreak >nul
 "%ADB%" exec-out screencap -p > "%OUT%\%~2_mid.png"
@@ -39,6 +41,7 @@ timeout /t %HALF% /nobreak >nul
 "%ADB%" exec-out screencap -p > "%OUT%\%~2.png"
 "%ADB%" shell pidof %PKG% > "%OUT%\%~2_alive.txt" 2>&1
 if not "%PROF%"=="0" call :profile "%~2"
+"%ADB%" shell pkill -f halo3_mon.sh >nul 2>&1
 "%ADB%" shell am force-stop %PKG%
 "%ADB%" pull %PKGDIR%/halo3.log "%OUT%\%~2.log" >nul 2>&1
 "%ADB%" logcat -d -v threadtime > "%OUT%\%~2_logcat.txt" 2>&1

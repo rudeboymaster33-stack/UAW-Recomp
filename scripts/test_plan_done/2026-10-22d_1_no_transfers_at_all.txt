@@ -1,0 +1,2 @@
+#wait=65
+--gpu_debug_skip_all_transfers=true

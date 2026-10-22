@@ -1,0 +1,3 @@
+#wait=65
+--execute_unclipped_draw_vs_on_cpu=true
+--execute_unclipped_draw_vs_on_cpu_with_scissor=true

@@ -61,6 +61,11 @@ public class Halo3Activity extends SDLActivity {
         args.add("--gpu_shader_fast_multiply=true");
         // Hardware texture LOD + bias instead of explicit gradients: about +5%.
         args.add("--gpu_shader_implicit_lod=true");
+        // Let the driver fuse multiply-adds in pixel shaders (small gain, no visible change).
+        args.add("--gpu_shader_allow_fma=true");
+        // Measure screen-space draws (clears etc.) on the CPU so EDRAM ownership copies
+        // only cover what they touch: 18-25 -> 24-30 fps on the menu.
+        args.add("--execute_unclipped_draw_vs_on_cpu=true");
         // Evenly paced frames: FIFO presentation (VK_GOOGLE_display_timing).
         args.add("--vulkan_allow_present_mode_immediate=false");
         args.add("--vulkan_allow_present_mode_mailbox=false");
