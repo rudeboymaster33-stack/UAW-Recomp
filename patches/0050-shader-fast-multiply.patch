@@ -1,0 +1,38 @@
+From adcb280df73d1b62373f50436388ada17931e20d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 22:10:49 -0400
+Subject: [PATCH] spirv: gpu_shader_fast_multiply - plain IEEE multiplies
+ instead of the 0 * anything = 0 emulation
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ src/graphics/pipeline/shader/spirv_translator_alu.cpp | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/graphics/pipeline/shader/spirv_translator_alu.cpp b/src/graphics/pipeline/shader/spirv_translator_alu.cpp
+index 67a6fb2..a41ab6b 100644
+--- a/src/graphics/pipeline/shader/spirv_translator_alu.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator_alu.cpp
+@@ -21,10 +21,18 @@
+ #include <rex/graphics/pipeline/shader/spirv_translator.h>
+ #include <rex/math.h>
+ 
++REXCVAR_DEFINE_BOOL(gpu_shader_fast_multiply, false, "GPU/Shader",
++                    "Translate guest multiplications as plain IEEE multiplications instead of "
++                    "emulating the Xbox 360 rule that 0 * anything = 0 (faster, but infinity or "
++                    "NaN can appear where the console would have produced 0)");
++
+ namespace rex::graphics {
+ 
+ spv::Id SpirvShaderTranslator::ZeroIfAnyOperandIsZero(spv::Id value, spv::Id operand_0_abs,
+                                                       spv::Id operand_1_abs) {
++  if (REXCVAR_GET(gpu_shader_fast_multiply)) {
++    return value;
++  }
+   EnsureBuildPointAvailable();
+   int num_components = builder_->getNumComponents(value);
+   assert_true(builder_->getNumComponents(operand_0_abs) == num_components);
+-- 
+2.43.0
+

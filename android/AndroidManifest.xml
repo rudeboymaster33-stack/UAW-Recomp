@@ -28,6 +28,8 @@
         android:isGame="true"
         android:appCategory="game"
         android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
+        <!-- Lets the Android profiler (simpleperf) sample the game for speed work. -->
+        <profileable android:shell="true" />
 
         <activity
             android:name="com.halo3.recomp.Halo3Activity"

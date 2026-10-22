@@ -1,0 +1,2 @@
+#wait=70
+--gpu_force_msaa_1x=true

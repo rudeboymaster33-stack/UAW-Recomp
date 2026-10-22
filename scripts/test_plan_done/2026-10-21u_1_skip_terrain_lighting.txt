@@ -1,0 +1,2 @@
+#wait=70
+--gpu_skip_pixel_shaders=C9A3B13987A8338D

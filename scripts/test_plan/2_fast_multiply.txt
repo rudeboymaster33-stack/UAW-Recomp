@@ -1,0 +1,2 @@
+#wait=65
+--gpu_shader_fast_multiply=true

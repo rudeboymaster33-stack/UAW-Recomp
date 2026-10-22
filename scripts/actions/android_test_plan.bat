@@ -23,6 +23,8 @@ set /a N+=1
 set "WAITS=90"
 for /f "usebackq tokens=2 delims==" %%W in (`findstr /b /c:"#wait=" "%~1"`) do set "WAITS=%%W"
 set /a HALF=WAITS/2
+set "PROF=0"
+for /f "usebackq tokens=2 delims==" %%W in (`findstr /b /c:"#profile=" "%~1"`) do set "PROF=%%W"
 echo [%TIME%] Run %N% of %COUNT%: %~2 (%WAITS% s)
 "%ADB%" shell am force-stop %PKG%
 "%ADB%" shell rm -rf %PKGDIR%/halo3.log %PKGDIR%/args.txt %PKGDIR%/env.txt %PKGDIR%/dump
@@ -32,9 +34,11 @@ if exist "%ROOT%scripts\android_test_env.txt" "%ADB%" push "%ROOT%scripts\androi
 "%ADB%" shell am start -n %PKG%/.Halo3Activity >nul
 timeout /t %HALF% /nobreak >nul
 "%ADB%" exec-out screencap -p > "%OUT%\%~2_mid.png"
+"%ADB%" shell "top -H -b -n 2 -d 3 -m 25 -p $(pidof %PKG%)" > "%OUT%\%~2_threads.txt" 2>&1
 timeout /t %HALF% /nobreak >nul
 "%ADB%" exec-out screencap -p > "%OUT%\%~2.png"
 "%ADB%" shell pidof %PKG% > "%OUT%\%~2_alive.txt" 2>&1
+if not "%PROF%"=="0" call :profile "%~2"
 "%ADB%" shell am force-stop %PKG%
 "%ADB%" pull %PKGDIR%/halo3.log "%OUT%\%~2.log" >nul 2>&1
 "%ADB%" logcat -d -v threadtime > "%OUT%\%~2_logcat.txt" 2>&1
@@ -42,4 +46,19 @@ timeout /t %HALF% /nobreak >nul
   mkdir "%OUT%\%~2_dump" >nul 2>&1
   "%ADB%" pull %PKGDIR%/dump "%OUT%\%~2_dump" >nul 2>&1
 )
+exit /b 0
+
+:profile
+REM "#profile=NN" in a run file: sample the running game's CPU use for NN seconds with simpleperf.
+set "SPERF=%ROOT%..\UAW-Recomp\android-tools\sdk\ndk\27.2.12479018\simpleperf\bin\android\arm64\simpleperf"
+if not exist "%SPERF%" (echo simpleperf not found> "%OUT%\%~1_perf_report.txt" & exit /b 0)
+echo   profiling the CPU for %PROF% s...
+"%ADB%" push "%SPERF%" /data/local/tmp/simpleperf >nul 2>&1
+"%ADB%" shell chmod 755 /data/local/tmp/simpleperf
+"%ADB%" shell rm -f /data/local/tmp/h3perf.data
+"%ADB%" shell "/data/local/tmp/simpleperf list" > "%OUT%\%~1_perf_events.txt" 2>&1
+"%ADB%" shell "/data/local/tmp/simpleperf record --app %PKG% -f 2000 --duration %PROF% -o /data/local/tmp/h3perf.data" > "%OUT%\%~1_perf_record.txt" 2>&1
+"%ADB%" shell "ls /data/local/tmp/h3perf.data" >nul 2>&1 || "%ADB%" shell "/data/local/tmp/simpleperf record --app %PKG% -e task-clock -f 2000 --duration %PROF% -o /data/local/tmp/h3perf.data" >> "%OUT%\%~1_perf_record.txt" 2>&1
+"%ADB%" shell "/data/local/tmp/simpleperf report -i /data/local/tmp/h3perf.data --sort comm,dso -n" > "%OUT%\%~1_perf_threads.txt" 2>&1
+"%ADB%" shell "/data/local/tmp/simpleperf report -i /data/local/tmp/h3perf.data --sort comm,dso,symbol -n --percent-limit 0.2" > "%OUT%\%~1_perf_report.txt" 2>&1
 exit /b 0

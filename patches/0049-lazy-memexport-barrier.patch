@@ -1,0 +1,132 @@
+From 9799f83e5fc3174087b6d6d42c609fdf9461943a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 21:54:55 -0400
+Subject: [PATCH] vulkan: defer memexport barriers inside a draw pass until an
+ overlapping read (fewer pass splits)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ include/rex/graphics/vulkan/shared_memory.h |  1 +
+ src/graphics/vulkan/command_processor.cpp   |  7 +++-
+ src/graphics/vulkan/gpu_frame_stats.h       |  4 +-
+ src/graphics/vulkan/shared_memory.cpp       | 43 +++++++++++++++++++++
+ 4 files changed, 52 insertions(+), 3 deletions(-)
+
+diff --git a/include/rex/graphics/vulkan/shared_memory.h b/include/rex/graphics/vulkan/shared_memory.h
+index 2c6c402..e1e4ea5 100644
+--- a/include/rex/graphics/vulkan/shared_memory.h
++++ b/include/rex/graphics/vulkan/shared_memory.h
+@@ -93,6 +93,7 @@ class VulkanSharedMemory : public SharedMemory {
+   bool draw_reads_saturated_ = false;
+   static void AddReadRange(std::vector<std::pair<uint32_t, uint32_t>>& list, bool& saturated,
+                            uint32_t start, uint32_t end);
++  bool DrawReadsOverlap(std::pair<uint32_t, uint32_t> range) const;
+   bool ScopeReadsOverlap(
+       const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) const;
+ };
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index c198ee2..864513d 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -2436,8 +2436,11 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+           "shm_uploads={:.1f} shm_upload={:.0f}KB tight_area={:.2f}MPix extents(per frame):{}",
+           st.pass_breaks / f, st.buffer_barriers / f, st.image_barriers / f, st.shm_uploads / f,
+           st.shm_upload_kb / f, st.tight_area_kpix / f / 1000.0, extents);
+-      REXGPU_INFO("[gpu-hoist] per frame: uploads_moved_before_pass={:.1f} uploads_kept={:.1f}",
+-                  st.shm_hoisted / f, st.shm_hoist_blocked / f);
++      REXGPU_INFO(
++          "[gpu-hoist] per frame: uploads_moved_before_pass={:.1f} uploads_kept={:.1f} "
++          "shm_barriers_in_pass={:.1f} memexport_barriers_deferred={:.1f}",
++          st.shm_hoisted / f, st.shm_hoist_blocked / f, st.shm_use_barriers_in_pass / f,
++          st.shm_memexport_deferred / f);
+       REXGPU_INFO(
+           "[gpu-query] per frame: queries={:.1f} draws_in_queries={:.1f} skipped={:.1f} "
+           "kept_zwrite={:.1f} kept_color={:.1f} kept_other={:.1f}",
+diff --git a/src/graphics/vulkan/gpu_frame_stats.h b/src/graphics/vulkan/gpu_frame_stats.h
+index 8d8b203..f823026 100644
+--- a/src/graphics/vulkan/gpu_frame_stats.h
++++ b/src/graphics/vulkan/gpu_frame_stats.h
+@@ -28,7 +28,9 @@ struct GpuFrameStats {
+   uint64_t shm_uploads = 0;      // shared memory upload calls that copied data
+   uint64_t shm_upload_kb = 0;
+   uint64_t shm_hoisted = 0;        // uploads moved to before the render pass
+-  uint64_t shm_hoist_blocked = 0;  // uploads in a draw pass that could not be moved
++  uint64_t shm_hoist_blocked = 0;
++  uint64_t shm_use_barriers_in_pass = 0;   // shared memory barriers while a draw pass is open
++  uint64_t shm_memexport_deferred = 0;     // memexport barriers deferred (no overlapping read)  // uploads in a draw pass that could not be moved
+   uint64_t queries = 0;              // guest occlusion queries begun
+   uint64_t query_draws = 0;          // draws issued while a guest query was open
+   uint64_t query_draws_skipped = 0;  // of those, skipped (no visible effect)
+diff --git a/src/graphics/vulkan/shared_memory.cpp b/src/graphics/vulkan/shared_memory.cpp
+index 87dd99e..7f4d962 100644
+--- a/src/graphics/vulkan/shared_memory.cpp
++++ b/src/graphics/vulkan/shared_memory.cpp
+@@ -34,6 +34,11 @@ REXCVAR_DEFINE_BOOL(vulkan_hoist_shared_memory_uploads, true, "GPU",
+                     "before the pass when no earlier draw in the pass read that memory "
+                     "(avoids costly render pass splits on tile-based mobile GPUs)");
+ 
++REXCVAR_DEFINE_BOOL(vulkan_lazy_memexport_barrier, true, "GPU",
++                    "Inside a draw render pass, delay the barrier after a memory-exporting draw "
++                    "until a later draw actually reads the exported range (avoids splitting the "
++                    "pass - expensive on tile-based GPUs)");
++
+ namespace rex::graphics::vulkan {
+ 
+ VulkanSharedMemory::VulkanSharedMemory(VulkanCommandProcessor& command_processor,
+@@ -208,7 +213,32 @@ void VulkanSharedMemory::Use(Usage usage, std::pair<uint32_t, uint32_t> written_
+   written_range.first = std::min(written_range.first, kBufferSize);
+   written_range.second = std::min(written_range.second, kBufferSize - written_range.first);
+   assert_true(usage != Usage::kRead || !written_range.second);
++  uint32_t hoist_index_unused;
++  bool in_draw_pass = command_processor_.GetDrawPassHoistPoint(hoist_index_unused);
++  if (in_draw_pass && REXCVAR_GET(vulkan_lazy_memexport_barrier) &&
++      last_usage_ == Usage::kGuestDrawReadWrite && last_written_range_.second &&
++      (usage == Usage::kRead || usage == Usage::kGuestDrawReadWrite) &&
++      !DrawReadsOverlap(last_written_range_) &&
++      (usage == Usage::kRead || !written_range.second ||
++       (written_range.first + written_range.second <= last_written_range_.first ||
++        last_written_range_.first + last_written_range_.second <= written_range.first))) {
++    // Nothing this draw reads (vertex, index data) or writes overlaps the
++    // memory exported by the earlier draws in this pass - keep the export
++    // pending instead of ending the pass for a barrier. It is committed by the
++    // first later use that overlaps it, or by any use outside the pass.
++    if (usage == Usage::kGuestDrawReadWrite && written_range.second) {
++      uint32_t start = std::min(last_written_range_.first, written_range.first);
++      uint32_t end = std::max(last_written_range_.first + last_written_range_.second,
++                              written_range.first + written_range.second);
++      last_written_range_ = std::make_pair(start, end - start);
++    }
++    ++GetGpuFrameStats().shm_memexport_deferred;
++    return;
++  }
+   if (last_usage_ != usage || last_written_range_.second) {
++    if (in_draw_pass) {
++      ++GetGpuFrameStats().shm_use_barriers_in_pass;
++    }
+     VkPipelineStageFlags src_stage_mask, dst_stage_mask;
+     VkAccessFlags src_access_mask, dst_access_mask;
+     GetUsageMasks(last_usage_, src_stage_mask, src_access_mask);
+@@ -324,6 +354,19 @@ void VulkanSharedMemory::OnRangesRequested(
+   }
+ }
+ 
++bool VulkanSharedMemory::DrawReadsOverlap(std::pair<uint32_t, uint32_t> range) const {
++  if (draw_reads_saturated_) {
++    return true;
++  }
++  uint64_t start = range.first, end = uint64_t(range.first) + range.second;
++  for (const std::pair<uint32_t, uint32_t>& read : draw_reads_) {
++    if (uint64_t(read.first) < end && start < uint64_t(read.second)) {
++      return true;
++    }
++  }
++  return false;
++}
++
+ bool VulkanSharedMemory::ScopeReadsOverlap(
+     const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) const {
+   if (scope_saturated_) {
+-- 
+2.43.0
+
