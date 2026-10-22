@@ -50,6 +50,15 @@ public class Halo3Activity extends SDLActivity {
         // Halo 3 renders to 8_8_8_8_GAMMA targets and expects real 8-bit storage;
         // the 16-bit emulation of them makes the menu scene far too bright.
         args.add("--gamma_render_target_as_unorm16=false");
+        // Copying shader memory writes back to the CPU stalled the GPU ~10 times
+        // per frame (10 -> 13.5 fps on the menu without it); Halo 3 does not need it.
+        args.add("--readback_memexport=false");
+        // Render without 4x MSAA: about +33% speed on the menu (13.5 -> 18 fps).
+        // Known side effect: black boxes for a moment right after skipping the intro.
+        args.add("--gpu_force_msaa_1x=true");
+        // Plain multiplies in translated shaders instead of emulating the Xbox 360
+        // "0 * anything = 0" rule: about +25% on the menu, no visible difference.
+        args.add("--gpu_shader_fast_multiply=true");
         // Evenly paced frames: FIFO presentation (VK_GOOGLE_display_timing).
         args.add("--vulkan_allow_present_mode_immediate=false");
         args.add("--vulkan_allow_present_mode_mailbox=false");

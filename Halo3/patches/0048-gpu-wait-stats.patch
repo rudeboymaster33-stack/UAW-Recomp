@@ -1,0 +1,107 @@
+From e27b0ecd4826576f99db7f4f793a9e0e49708596 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 21:28:25 -0400
+Subject: [PATCH] vulkan: [gpu-wait] statistics - time the command processor
+ blocks on GPU fences
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ .../rex/graphics/vulkan/command_processor.h   |  5 +++++
+ src/graphics/vulkan/command_processor.cpp     | 22 +++++++++++++++++++
+ src/graphics/vulkan/gpu_frame_stats.h         |  5 +++++
+ 3 files changed, 32 insertions(+)
+
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+index 93f72f1..d54ca83 100644
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -426,6 +426,7 @@ class VulkanCommandProcessor : public CommandProcessor {
+   // successfully, if it has failed, leaves it open.
+   bool EndSubmission(bool is_swap);
+   bool AwaitAllQueueOperationsCompletion() {
++    ++await_all_calls_;
+     CheckSubmissionFenceAndDeviceLoss(GetCurrentSubmission());
+     return !submission_open_ && submissions_in_flight_fences_.empty();
+   }
+@@ -872,6 +873,10 @@ class VulkanCommandProcessor : public CommandProcessor {
+   uint32_t break_pusher_image_[16] = {};
+   // One-frame trace of the pass sequence (logged as [gpu-trace]).
+   bool pass_trace_active_ = false;
++  // [gpu-wait] statistics.
++  bool fence_wait_is_frame_ = false;
++  uint64_t await_all_calls_ = 0;
++  uint64_t await_all_calls_logged_ = 0;
+   uint32_t pass_trace_frame_countdown_ = 0;
+   std::string pass_trace_;
+   uint32_t pass_trace_draws_ = 0;
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index d1f6ecf..c198ee2 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -2443,6 +2443,13 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+           "kept_zwrite={:.1f} kept_color={:.1f} kept_other={:.1f}",
+           st.queries / f, st.query_draws / f, st.query_draws_skipped / f,
+           st.query_draws_zwrite / f, st.query_draws_color / f, st.query_draws_other / f);
++      st.await_all = await_all_calls_ - await_all_calls_logged_;
++      await_all_calls_logged_ = await_all_calls_;
++      REXGPU_INFO(
++          "[gpu-wait] per frame: fence_waits={:.1f} fence_wait={:.1f}ms (frame slot: {:.1f} waits, "
++          "{:.1f}ms) await_all={:.1f}",
++          st.fence_waits / f, st.fence_wait_us / f / 1000.0, st.frame_fence_waits / f,
++          st.frame_fence_wait_us / f / 1000.0, st.await_all / f);
+       GpuTsLog(f);
+       LogPassBreakPushers(f);
+       st = GpuFrameStats{};
+@@ -5815,9 +5822,22 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
+     // defined by vkQueueSubmit additionally include in the first
+     // synchronization scope all commands that occur earlier in submission
+     // order."
++    auto wait_start = std::chrono::steady_clock::now();
+     VkResult wait_result =
+         dfn.vkWaitForFences(device, uint32_t(await_submission - submission_completed_),
+                             submissions_in_flight_fences_.data(), VK_TRUE, UINT64_MAX);
++    {
++      uint64_t us = uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
++                                 std::chrono::steady_clock::now() - wait_start)
++                                 .count());
++      GpuFrameStats& wst = GetGpuFrameStats();
++      ++wst.fence_waits;
++      wst.fence_wait_us += us;
++      if (fence_wait_is_frame_) {
++        ++wst.frame_fence_waits;
++        wst.frame_fence_wait_us += us;
++      }
++    }
+     if (wait_result == VK_SUCCESS) {
+       fences_awaited += await_submission - submission_completed_;
+     } else {
+@@ -5956,7 +5976,9 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+   // is still available, and whether the await was successful.
+   uint64_t await_submission =
+       is_opening_frame ? closed_frame_submissions_[frame_current_ % kMaxFramesInFlight] : 0;
++  fence_wait_is_frame_ = is_opening_frame;
+   CheckSubmissionFenceAndDeviceLoss(await_submission);
++  fence_wait_is_frame_ = false;
+   if (device_lost_ || submission_completed_ < await_submission) {
+     return false;
+   }
+diff --git a/src/graphics/vulkan/gpu_frame_stats.h b/src/graphics/vulkan/gpu_frame_stats.h
+index 1c4b10c..8d8b203 100644
+--- a/src/graphics/vulkan/gpu_frame_stats.h
++++ b/src/graphics/vulkan/gpu_frame_stats.h
+@@ -6,6 +6,11 @@
+ namespace rex::graphics::vulkan {
+ 
+ struct GpuFrameStats {
++  uint64_t fence_waits = 0;         // blocking vkWaitForFences calls
++  uint64_t fence_wait_us = 0;       // time blocked in them
++  uint64_t frame_fence_waits = 0;   // ...of which for a free frame slot
++  uint64_t frame_fence_wait_us = 0;
++  uint64_t await_all = 0;           // AwaitAllQueueOperationsCompletion calls
+   uint64_t draws = 0;
+   uint64_t passes = 0;          // render pass / dynamic rendering begins
+   uint64_t pass_mpixels_x1000 = 0;  // sum of render area (thousand-pixels)
+-- 
+2.43.0
+

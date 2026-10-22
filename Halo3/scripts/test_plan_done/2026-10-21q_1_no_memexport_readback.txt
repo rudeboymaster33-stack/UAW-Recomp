@@ -1,0 +1,2 @@
+#wait=70
+--readback_memexport=false

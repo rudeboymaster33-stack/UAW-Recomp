@@ -1,0 +1,40 @@
+From 6c8f34484e8d1b824541c59efa0c7def16398a6f Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 21:07:58 -0400
+Subject: [PATCH] vulkan: log [gpu-fps] frames per second every 120 frames
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ src/graphics/vulkan/command_processor.cpp | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 4cb1cb6..d1f6ecf 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include <algorithm>
++#include <chrono>
+ #include <array>
+ #include <cstdint>
+ #include <cstring>
+@@ -2411,6 +2412,13 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+     GpuFrameStats& st = GetGpuFrameStats();
+     if (++st.frames >= 120) {
+       double f = double(st.frames);
++      static auto fps_last_time = std::chrono::steady_clock::now();
++      auto fps_now = std::chrono::steady_clock::now();
++      double fps_seconds = std::chrono::duration<double>(fps_now - fps_last_time).count();
++      fps_last_time = fps_now;
++      REXGPU_INFO("[gpu-fps] {:.1f} frames per second ({:.1f} ms per frame)",
++                  fps_seconds > 0.0 ? f / fps_seconds : 0.0,
++                  fps_seconds * 1000.0 / f);
+       REXGPU_INFO(
+           "[gpu-stats] per frame: draws={:.0f} passes={:.1f} pass_area={:.2f}MPix "
+           "transfer_passes={:.1f} clear_passes={:.1f} resolves={:.1f} barrier_batches={:.1f} "
+-- 
+2.43.0
+
