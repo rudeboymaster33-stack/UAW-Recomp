@@ -1,0 +1,125 @@
+From d80bedadc9438b80915f4b5d5113e1533fd950f3 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 22 Oct 2026 19:39:48 -0400
+Subject: [PATCH] gpu: full-clear transfer skip - one-tile edge tolerance and
+ rejection statistics
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ .../rex/graphics/pipeline/render_target/cache.h |  4 ++++
+ src/graphics/pipeline/render_target/cache.cpp   | 17 ++++++++++++++++-
+ src/graphics/vulkan/command_processor.cpp       | 11 +++++++++--
+ 3 files changed, 29 insertions(+), 3 deletions(-)
+
+diff --git a/include/rex/graphics/pipeline/render_target/cache.h b/include/rex/graphics/pipeline/render_target/cache.h
+index 36c941d..96a49ba 100644
+--- a/include/rex/graphics/pipeline/render_target/cache.h
++++ b/include/rex/graphics/pipeline/render_target/cache.h
+@@ -185,6 +185,9 @@ class RenderTargetCache {
+   // copying the old EDRAM contents into it can be skipped.
+   void SetNextDrawPixelShader(const Shader* pixel_shader) { next_draw_pixel_shader_ = pixel_shader; }
+   uint64_t skipped_clear_transfers() const { return skipped_clear_transfers_; }
++  // [0] kill/alpha test, [1] no fully-overwritten target, [2] not a measurable
++  // rectangle, [3] rectangle does not cover the target.
++  const uint64_t* clear_skip_rejections() const { return clear_skip_rejections_; }
+ 
+  protected:
+   RenderTargetCache(const RegisterFile& register_file, const memory::Memory& memory,
+@@ -699,6 +702,7 @@ class RenderTargetCache {
+   std::vector<Transfer> last_update_transfers_[1 + xenos::kMaxColorRenderTargets];
+   const Shader* next_draw_pixel_shader_ = nullptr;
+   uint64_t skipped_clear_transfers_ = 0;
++  uint64_t clear_skip_rejections_[4] = {};
+ };
+ 
+ }  // namespace rex::graphics
+diff --git a/src/graphics/pipeline/render_target/cache.cpp b/src/graphics/pipeline/render_target/cache.cpp
+index ee3174c..aea98cd 100644
+--- a/src/graphics/pipeline/render_target/cache.cpp
++++ b/src/graphics/pipeline/render_target/cache.cpp
+@@ -41,6 +41,9 @@ REXCVAR_DEFINE_BOOL(gpu_skip_transfers_before_full_clears, false, "GPU",
+                     "Skip copying old EDRAM contents into render targets that the current draw "
+                     "(a screen-covering rectangle with ALWAYS depth / stencil REPLACE or opaque "
+                     "full-mask color) completely overwrites");
++REXCVAR_DEFINE_INT32(gpu_full_clear_tolerance_px, 79, "GPU",
++                     "How many pixels at the right / bottom edge of a render target a clear may "
++                     "leave uncovered and still count as a full clear");
+ REXCVAR_DEFINE_BOOL(direct_host_resolve, true, "GPU",
+                     "Resolve from host render targets directly to shared memory when possible")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+@@ -416,10 +419,12 @@ void RenderTargetCache::SkipTransfersBeforeFullClear(
+   }
+   const Shader* pixel_shader = next_draw_pixel_shader_;
+   if (pixel_shader && pixel_shader->kills_pixels()) {
++    ++clear_skip_rejections_[0];
+     return;
+   }
+   auto rb_colorcontrol = regs.Get<reg::RB_COLORCONTROL>();
+   if (rb_colorcontrol.alpha_test_enable || rb_colorcontrol.alpha_to_mask_enable) {
++    ++clear_skip_rejections_[0];
+     return;
+   }
+   uint32_t overwrite_bits = 0;
+@@ -451,14 +456,17 @@ void RenderTargetCache::SkipTransfersBeforeFullClear(
+     }
+   }
+   if (!overwrite_bits) {
++    ++clear_skip_rejections_[1];
+     return;
+   }
+   int32_t rect_x0, rect_y0, rect_x1, rect_y1;
+   if (!draw_extent_estimator_.EstimateRectangleCoverage(vertex_shader, rect_x0, rect_y0, rect_x1,
+                                                         rect_y1)) {
++    ++clear_skip_rejections_[2];
+     return;
+   }
+   if (rect_x0 > 0 || rect_y0 > 0) {
++    ++clear_skip_rejections_[3];
+     return;
+   }
+   // The window scissor limits what any draw can touch.
+@@ -488,9 +496,16 @@ void RenderTargetCache::SkipTransfersBeforeFullClear(
+                               uint32_t(key.msaa_samples >= xenos::MsaaSamples::k2X));
+     int32_t need_x1 = std::min(width_px, scissor_x1);
+     int32_t need_y1 = std::min(rows_px, scissor_y1);
+-    if (rect_x1 >= need_x1 && rect_y1 >= need_y1) {
++    // Halo 3 clears its 1152-pixel-wide viewport while the render target pitch
++    // is rounded up to whole 80-pixel tiles - the leftover columns / rows past
++    // the viewport are never displayed or resolved, so allow being up to one
++    // tile short of the full render target there.
++    if (rect_x1 >= need_x1 - int32_t(REXCVAR_GET(gpu_full_clear_tolerance_px)) &&
++        rect_y1 >= need_y1 - int32_t(REXCVAR_GET(gpu_full_clear_tolerance_px))) {
+       skipped_clear_transfers_ += transfers.size();
+       transfers.clear();
++    } else {
++      ++clear_skip_rejections_[3];
+     }
+   }
+ }
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 2e28e33..8cb06b7 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -2439,9 +2439,16 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+       {
+         static uint64_t skipped_logged = 0;
+         uint64_t skipped = render_target_cache_->skipped_clear_transfers();
+-        REXGPU_INFO("[gpu-xfer] per frame: transfers skipped before full clears={:.1f}",
+-                    (skipped - skipped_logged) / f);
++        static uint64_t rej_logged[4] = {};
++        const uint64_t* rej = render_target_cache_->clear_skip_rejections();
++        REXGPU_INFO(
++            "[gpu-xfer] per frame: transfers skipped before full clears={:.1f} not skipped: "
++            "kill/alpha={:.1f} no_full_overwrite={:.1f} no_rect={:.1f} not_covering={:.1f}",
++            (skipped - skipped_logged) / f, (rej[0] - rej_logged[0]) / f,
++            (rej[1] - rej_logged[1]) / f, (rej[2] - rej_logged[2]) / f,
++            (rej[3] - rej_logged[3]) / f);
+         skipped_logged = skipped;
++        for (int r = 0; r < 4; ++r) rej_logged[r] = rej[r];
+       }
+       REXGPU_INFO(
+           "[gpu-hoist] per frame: uploads_moved_before_pass={:.1f} uploads_kept={:.1f} "
+-- 
+2.43.0
+

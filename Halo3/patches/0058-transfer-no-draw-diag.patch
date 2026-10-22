@@ -1,0 +1,40 @@
+From 2ef553b69395eb3540186509dd7114811fa96abe Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 22 Oct 2026 19:49:44 -0400
+Subject: [PATCH] vulkan: gpu_debug_transfer_no_draw diagnostic (transfer pass
+ overhead vs copy work)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ src/graphics/vulkan/render_target_cache.cpp | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
+index a2ed6fb..dad9e1b 100644
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -64,6 +64,9 @@ REXCVAR_DEFINE_STRING(render_target_path_vulkan, "", "GPU/Vulkan",
+ 
+ #include "gpu_frame_stats.h"
+ 
++REXCVAR_DEFINE_BOOL(gpu_debug_transfer_no_draw, false, "GPU",
++                    "Diagnostic only (breaks visuals): begin EDRAM transfer passes but draw "
++                    "nothing in them");
+ REXCVAR_DEFINE_BOOL(gpu_debug_skip_all_transfers, false, "GPU",
+                     "Diagnostic only (breaks visuals): skip all EDRAM ownership transfers");
+ 
+@@ -5299,7 +5302,9 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+               command_buffer.CmdVkSetStencilWriteMask(VK_STENCIL_FACE_FRONT_AND_BACK,
+                                                       transfer_stencil_bit);
+             }
+-            command_buffer.CmdVkDraw(transfer_vertex_count, 1, 0, 0);
++            if (!REXCVAR_GET(gpu_debug_transfer_no_draw)) {
++              command_buffer.CmdVkDraw(transfer_vertex_count, 1, 0, 0);
++            }
+           }
+         }
+       }
+-- 
+2.43.0
+

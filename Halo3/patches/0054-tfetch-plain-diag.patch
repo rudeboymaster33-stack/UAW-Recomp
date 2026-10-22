@@ -1,0 +1,60 @@
+From a28204afe88b249fa93fd4e0abadb1f2ee5f852c Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 22:50:31 -0400
+Subject: [PATCH] spirv: gpu_debug_tfetch_plain diagnostic - measure texture
+ sign/gamma handling cost
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ .../shader/spirv_translator_fetch.cpp         | 20 ++++++++++++++++++-
+ 1 file changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
+index cf5be05..675eadd 100644
+--- a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
+@@ -23,6 +23,8 @@
+ #include <rex/graphics/pipeline/shader/spirv_translator.h>
+ #include <rex/math.h>
+ 
++REXCVAR_DEFINE_BOOL(gpu_debug_tfetch_plain, false, "GPU/Shader",
++                    "Diagnostic only (wrong colors): skip texture signedness and gamma handling");
+ REXCVAR_DEFINE_BOOL(gpu_shader_implicit_lod, false, "GPU/Shader",
+                     "In pixel shaders, sample 2D and cube textures with hardware-computed LOD "
+                     "plus a bias instead of explicit gradients (faster on mobile GPUs; mip "
+@@ -1413,6 +1415,14 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
+         }
+         spv::Id is_any_unsigned =
+             builder_->createUnaryOp(spv::OpLogicalNot, type_bool_, is_all_signed);
++        const bool debug_plain_fetch = REXCVAR_GET(gpu_debug_tfetch_plain);
++        if (debug_plain_fetch) {
++          // Diagnostic: treat every texture as plain unsigned, to measure the
++          // cost of the per-fetch signedness / gamma handling.
++          is_all_signed = builder_->makeBoolConstant(false);
++          is_any_signed = builder_->makeBoolConstant(false);
++          is_any_unsigned = builder_->makeBoolConstant(true);
++        }
+ 
+         // Load the fetch constant word 4, needed unconditionally for LOD
+         // biasing, for result exponent biasing, and conditionally for stacked
+@@ -1955,7 +1965,15 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
+         // to gamma-correct.
+         spv::Id const_float_2 = builder_->makeFloatConstant(2.0f);
+         spv::Id const_float_minus_1 = builder_->makeFloatConstant(-1.0f);
+-        {
++        if (debug_plain_fetch && features_.image_view_format_swizzle) {
++          uint32_t plain_remaining = used_result_nonzero_components;
++          uint32_t plain_index;
++          while (rex::bit_scan_forward(plain_remaining, &plain_index)) {
++            plain_remaining &= ~(UINT32_C(1) << plain_index);
++            result[plain_index] =
++                builder_->createCompositeExtract(sample_result_unsigned, type_float_, plain_index);
++          }
++        } else {
+           uint32_t result_remaining_components = used_result_nonzero_components;
+           uint32_t result_component_index;
+           while (rex::bit_scan_forward(result_remaining_components, &result_component_index)) {
+-- 
+2.43.0
+

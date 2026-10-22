@@ -1,0 +1,43 @@
+From 8be995ba156aa510271b70e93a459454bc4f2563 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 22 Oct 2026 19:45:23 -0400
+Subject: [PATCH] vulkan: gpu_debug_skip_all_transfers diagnostic (upper bound
+ of transfer savings)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ src/graphics/vulkan/render_target_cache.cpp | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
+index e25fbab..a2ed6fb 100644
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -64,6 +64,9 @@ REXCVAR_DEFINE_STRING(render_target_path_vulkan, "", "GPU/Vulkan",
+ 
+ #include "gpu_frame_stats.h"
+ 
++REXCVAR_DEFINE_BOOL(gpu_debug_skip_all_transfers, false, "GPU",
++                    "Diagnostic only (breaks visuals): skip all EDRAM ownership transfers");
++
+ namespace rex::graphics::vulkan {
+ 
+ // Set by the command processor while a [gpu-dt] frame trace is active.
+@@ -4558,6 +4561,13 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+     const Transfer::Rectangle* resolve_clear_rectangle) {
+   assert_true(GetPath() == Path::kHostRenderTargets);
+ 
++  static const std::vector<Transfer> kNoTransfers[1 + xenos::kMaxColorRenderTargets];
++  if (REXCVAR_GET(gpu_debug_skip_all_transfers)) {
++    // Diagnostic only (garbage): measure the upper bound of what avoiding
++    // EDRAM ownership transfers could save.
++    render_target_transfers = kNoTransfers;
++  }
++
+   const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
+   uint64_t current_submission = command_processor_.GetCurrentSubmission();
+   DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
+-- 
+2.43.0
+

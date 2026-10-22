@@ -1,0 +1,2 @@
+#wait=65
+--gpu_debug_transfer_no_draw=true

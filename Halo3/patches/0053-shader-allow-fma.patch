@@ -1,0 +1,91 @@
+From 27214e93026a9c4b13a31bbca142cf4c0256c42d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 22:44:09 -0400
+Subject: [PATCH] spirv: gpu_shader_allow_fma - let the driver fuse
+ multiply-adds in translated pixel shaders
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ include/rex/graphics/pipeline/shader/spirv_builder.h | 7 +++++++
+ src/graphics/pipeline/shader/spirv_builder.cpp       | 8 ++++++--
+ src/graphics/pipeline/shader/spirv_translator.cpp    | 6 ++++++
+ 3 files changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/include/rex/graphics/pipeline/shader/spirv_builder.h b/include/rex/graphics/pipeline/shader/spirv_builder.h
+index dbd6b01..834c8c7 100644
+--- a/include/rex/graphics/pipeline/shader/spirv_builder.h
++++ b/include/rex/graphics/pipeline/shader/spirv_builder.h
+@@ -34,6 +34,10 @@ class SpirvBuilder : public spv::Builder {
+   spv::Id createQuadOp(spv::Op op_code, spv::Id type_id, spv::Id operand1, spv::Id operand2,
+                        spv::Id operand3, spv::Id operand4);
+ 
++  // When set, "no contraction" operations are emitted without the
++  // NoContraction decoration, letting the driver fuse multiply-adds.
++  void set_allow_contraction(bool allow) { allow_contraction_ = allow; }
++
+   spv::Id createNoContractionUnaryOp(spv::Op op_code, spv::Id type_id, spv::Id operand);
+   spv::Id createNoContractionBinOp(spv::Op op_code, spv::Id type_id, spv::Id operand1,
+                                    spv::Id operand2);
+@@ -141,6 +145,9 @@ class SpirvBuilder : public spv::Builder {
+ 
+     Branch current_branch_ = Branch::kSelection;
+   };
++
++ private:
++  bool allow_contraction_ = false;
+ };
+ 
+ }  // namespace rex::graphics
+diff --git a/src/graphics/pipeline/shader/spirv_builder.cpp b/src/graphics/pipeline/shader/spirv_builder.cpp
+index fe0aa4e..4a0798e 100644
+--- a/src/graphics/pipeline/shader/spirv_builder.cpp
++++ b/src/graphics/pipeline/shader/spirv_builder.cpp
+@@ -42,14 +42,18 @@ spv::Id SpirvBuilder::createQuadOp(spv::Op op_code, spv::Id type_id, spv::Id ope
+ spv::Id SpirvBuilder::createNoContractionUnaryOp(spv::Op op_code, spv::Id type_id,
+                                                  spv::Id operand) {
+   spv::Id result = createUnaryOp(op_code, type_id, operand);
+-  addDecoration(result, spv::DecorationNoContraction);
++  if (!allow_contraction_) {
++    addDecoration(result, spv::DecorationNoContraction);
++  }
+   return result;
+ }
+ 
+ spv::Id SpirvBuilder::createNoContractionBinOp(spv::Op op_code, spv::Id type_id, spv::Id operand1,
+                                                spv::Id operand2) {
+   spv::Id result = createBinOp(op_code, type_id, operand1, operand2);
+-  addDecoration(result, spv::DecorationNoContraction);
++  if (!allow_contraction_) {
++    addDecoration(result, spv::DecorationNoContraction);
++  }
+   return result;
+ }
+ 
+diff --git a/src/graphics/pipeline/shader/spirv_translator.cpp b/src/graphics/pipeline/shader/spirv_translator.cpp
+index 504b821..fc54628 100644
+--- a/src/graphics/pipeline/shader/spirv_translator.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator.cpp
+@@ -33,6 +33,9 @@ REXCVAR_DEFINE_BOOL(vulkan_spirv_float_controls, true, "GPU/Vulkan",
+                     "on the Qualcomm proprietary driver, where they make gl_FragCoord read 0");
+ REXCVAR_DEFINE_BOOL(vulkan_spirv_sample_rate_shading, true, "GPU/Vulkan",
+                     "Allow SPIR-V sample rate shading features when the device supports them");
++REXCVAR_DEFINE_BOOL(gpu_shader_allow_fma, false, "GPU/Shader",
++                    "Allow the driver to fuse multiply-adds in translated pixel shaders (faster, "
++                    "results can differ in the last bits)");
+ REXCVAR_DEFINE_INT32(vulkan_spirv_max_version, 0, "GPU/Vulkan",
+                      "Highest SPIR-V version to emit, as 10/13/14/15 (0 = highest supported)");
+ 
+@@ -213,6 +216,9 @@ void SpirvShaderTranslator::StartTranslation() {
+   // TODO(Triang3l): Logger.
+   builder_ = std::make_unique<SpirvBuilder>(features_.spirv_version, (kSpirvMagicToolId << 16) | 1,
+                                             nullptr);
++  // Let the driver fuse multiply-adds in pixel shaders if allowed (vertex
++  // shaders keep exact operations for position invariance between passes).
++  builder_->set_allow_contraction(is_pixel_shader() && REXCVAR_GET(gpu_shader_allow_fma));
+ 
+   builder_->addCapability(IsSpirvTessEvalShader() ? spv::CapabilityTessellation
+                                                   : spv::CapabilityShader);
+-- 
+2.43.0
+
