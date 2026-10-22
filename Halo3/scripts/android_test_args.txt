@@ -1,1 +1,6 @@
+--gpu_skip_pixel_shaders=87021CCA423D6960,147502AAA07015CD,6A9CCE8A3240F718
 --vulkan_gpu_timestamps=true
+--readback_resolve=full
+--dump_shaders=/storage/emulated/0/Android/data/com.halo3.recomp/files/dump
+--gpu_debug_dump_resolves=true
+--gpu_debug_dump_frame=3

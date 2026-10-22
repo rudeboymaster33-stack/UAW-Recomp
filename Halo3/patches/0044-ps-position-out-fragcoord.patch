@@ -1,0 +1,92 @@
+From 5f3346a987340b7737d91540a8d487aa1bc50b1a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 20:39:23 -0400
+Subject: [PATCH] spirv: position-out diagnostic always declares FragCoord; R =
+ param gen x, G = FragCoord x, B = 0.5 marker
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ .../pipeline/shader/spirv_translator.h        |  2 ++
+ .../pipeline/shader/spirv_translator.cpp      |  3 ++-
+ .../pipeline/shader/spirv_translator_rb.cpp   | 20 +++++++++++--------
+ 3 files changed, 16 insertions(+), 9 deletions(-)
+
+diff --git a/include/rex/graphics/pipeline/shader/spirv_translator.h b/include/rex/graphics/pipeline/shader/spirv_translator.h
+index dce3dbf..96ef8ac 100644
+--- a/include/rex/graphics/pipeline/shader/spirv_translator.h
++++ b/include/rex/graphics/pipeline/shader/spirv_translator.h
+@@ -540,6 +540,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
+                Modification::DepthStencilMode::kEarlyHint &&
+            !edram_fragment_shader_interlock_ && current_shader().implicit_early_z_write_allowed();
+   }
++  // Diagnostic gpu_debug_ps_position_out matches the current pixel shader.
++  bool IsPositionOutDebugShader() const;
+   bool IsWritingFloat24Depth() const {
+     assert_true(is_pixel_shader());
+     if (edram_fragment_shader_interlock_) {
+diff --git a/src/graphics/pipeline/shader/spirv_translator.cpp b/src/graphics/pipeline/shader/spirv_translator.cpp
+index 405b5fa..1ce17ab 100644
+--- a/src/graphics/pipeline/shader/spirv_translator.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator.cpp
+@@ -2903,7 +2903,8 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
+   bool memexport_resolution_scaled = current_shader().memexport_eM_written() &&
+                                      (draw_resolution_scale_x_ > 1 || draw_resolution_scale_y_ > 1);
+   if (edram_fragment_shader_interlock_ || param_gen_needed || memexport_resolution_scaled ||
+-      float24_depth_from_fragment_coordinates || alpha_to_coverage_possible) {
++      float24_depth_from_fragment_coordinates || alpha_to_coverage_possible ||
++      (!is_depth_only_fragment_shader_ && IsPositionOutDebugShader())) {
+     input_fragment_coordinates_ = builder_->createVariable(spv::NoPrecision, spv::StorageClassInput,
+                                                            type_float4_, "gl_FragCoord");
+     builder_->addDecoration(input_fragment_coordinates_, spv::DecorationBuiltIn,
+diff --git a/src/graphics/pipeline/shader/spirv_translator_rb.cpp b/src/graphics/pipeline/shader/spirv_translator_rb.cpp
+index 882c99e..54431cb 100644
+--- a/src/graphics/pipeline/shader/spirv_translator_rb.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator_rb.cpp
+@@ -27,7 +27,7 @@
+ REXCVAR_DEFINE_STRING(gpu_debug_ps_position_out, "", "GPU",
+                       "Diagnostic only (breaks visuals): for the listed guest pixel shader hashes, "
+                       "write the pixel position instead of the colors (* = all shaders): R = ps_param_gen x / 2048, "
+-                      "G = ps_param_gen y / 2048, B = host FragCoord x / 2048, A = FragCoord y / 2048");
++                      "G = host FragCoord x / 2048, B = 0.5, A = 1");
+ 
+ namespace rex::graphics {
+ 
+@@ -402,13 +402,17 @@ spv::Id SpirvShaderTranslator::Depth20e4To32(SpirvBuilder& builder, spv::Id f24_
+   return f32;
+ }
+ 
++bool SpirvShaderTranslator::IsPositionOutDebugShader() const {
++  const std::string& debug_list = REXCVAR_GET(gpu_debug_ps_position_out);
++  return is_pixel_shader() && !debug_list.empty() &&
++         (debug_list == "*" ||
++          debug_list.find(fmt::format("{:016X}", current_shader().ucode_data_hash())) !=
++              std::string::npos);
++}
++
+ void SpirvShaderTranslator::CompleteFragmentShaderInMain() {
+   if (!edram_fragment_shader_interlock_) {
+-    const std::string& debug_list = REXCVAR_GET(gpu_debug_ps_position_out);
+-    if (!debug_list.empty() &&
+-        (debug_list == "*" ||
+-         debug_list.find(fmt::format("{:016X}", current_shader().ucode_data_hash())) !=
+-             std::string::npos)) {
++    if (IsPositionOutDebugShader()) {
+       spv::Id scale = builder_->makeFloatConstant(1.0f / 2048.0f);
+       spv::Id pg_x = const_float_0_, pg_y = const_float_0_;
+       uint32_t pg_index = GetPsParamGenInterpolator();
+@@ -434,9 +438,9 @@ void SpirvShaderTranslator::CompleteFragmentShaderInMain() {
+       }
+       id_vector_temp_.clear();
+       id_vector_temp_.push_back(builder_->createBinOp(spv::OpFMul, type_float_, pg_x, scale));
+-      id_vector_temp_.push_back(builder_->createBinOp(spv::OpFMul, type_float_, pg_y, scale));
+       id_vector_temp_.push_back(builder_->createBinOp(spv::OpFMul, type_float_, fc_x, scale));
+-      id_vector_temp_.push_back(builder_->createBinOp(spv::OpFMul, type_float_, fc_y, scale));
++      id_vector_temp_.push_back(builder_->makeFloatConstant(0.5f));
++      id_vector_temp_.push_back(builder_->makeFloatConstant(1.0f));
+       spv::Id debug_color = builder_->createCompositeConstruct(type_float4_, id_vector_temp_);
+       for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+         if (output_or_var_fragment_data_[i] != spv::NoResult) {
+-- 
+2.43.0
+

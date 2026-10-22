@@ -1,0 +1,2 @@
+#wait=60
+--vulkan_hoist_shared_memory_uploads=false

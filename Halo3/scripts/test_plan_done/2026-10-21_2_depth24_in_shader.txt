@@ -1,0 +1,2 @@
+#wait=90
+--depth_float24_convert_in_pixel_shader=true

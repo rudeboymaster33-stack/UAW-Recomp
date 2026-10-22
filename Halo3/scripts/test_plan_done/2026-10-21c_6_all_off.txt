@@ -1,0 +1,5 @@
+#wait=60
+--vulkan_hoist_shared_memory_uploads=false
+--vulkan_tight_render_area=false
+--vulkan_dynamic_rendering=false
+--async_shader_compilation=false

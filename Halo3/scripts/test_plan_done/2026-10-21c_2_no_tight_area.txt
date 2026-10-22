@@ -1,0 +1,2 @@
+#wait=60
+--vulkan_tight_render_area=false

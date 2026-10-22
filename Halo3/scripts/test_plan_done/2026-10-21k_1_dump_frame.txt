@@ -1,0 +1,7 @@
+#wait=70
+--vulkan_gpu_timestamps=true
+--readback_resolve=full
+--dump_shaders=/storage/emulated/0/Android/data/com.halo3.recomp/files/dump
+--gpu_debug_dump_resolves=true
+--gpu_debug_dump_frame=4
+--async_shader_compilation=false

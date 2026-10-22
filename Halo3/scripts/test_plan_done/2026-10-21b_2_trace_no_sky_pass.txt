@@ -1,0 +1,7 @@
+#wait=100
+--vulkan_gpu_timestamps=true
+--readback_resolve=full
+--dump_shaders=/storage/emulated/0/Android/data/com.halo3.recomp/files/dump
+--gpu_debug_dump_resolves=true
+--gpu_debug_dump_frame=3
+--gpu_skip_pixel_shaders=87021CCA423D6960,0B2430F27028F08E,181A0E603B08479D,2D64D0E2E09DEBBB,32CCC4EE66CC377F,4262568EEB7ACABF,54A1555654A99B38,8C39882EA960F78A,939E325E8178FACA,9585D1DCC650D645,9701660C33AFDBA4,A42E794E4F1AD57B,DF6D83F8960C6F91,E51DDF12EC553A60

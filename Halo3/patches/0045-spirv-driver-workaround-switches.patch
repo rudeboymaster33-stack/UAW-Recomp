@@ -1,0 +1,76 @@
+From 0d5a92dd13c592a561e064f1a8854b960e9a5f21 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 20:43:12 -0400
+Subject: [PATCH] spirv: cvars to turn off float controls / sample rate shading
+ and cap the SPIR-V version (driver bug hunting)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ .../pipeline/shader/spirv_translator.cpp      | 33 ++++++++++++++++---
+ 1 file changed, 29 insertions(+), 4 deletions(-)
+
+diff --git a/src/graphics/pipeline/shader/spirv_translator.cpp b/src/graphics/pipeline/shader/spirv_translator.cpp
+index 1ce17ab..0b0ad01 100644
+--- a/src/graphics/pipeline/shader/spirv_translator.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator.cpp
+@@ -27,6 +27,14 @@
+ #include <rex/math.h>
+ #include <rex/string/buffer.h>
+ 
++REXCVAR_DEFINE_BOOL(vulkan_spirv_float_controls, true, "GPU/Vulkan",
++                    "Use SPIR-V float controls execution modes (denorm flush, signed zero / "
++                    "inf / nan preserve, RTE rounding) when the device supports them");
++REXCVAR_DEFINE_BOOL(vulkan_spirv_sample_rate_shading, true, "GPU/Vulkan",
++                    "Allow SPIR-V sample rate shading features when the device supports them");
++REXCVAR_DEFINE_INT32(vulkan_spirv_max_version, 0, "GPU/Vulkan",
++                     "Highest SPIR-V version to emit, as 10/13/14/15 (0 = highest supported)");
++
+ namespace rex::graphics {
+ 
+ SpirvShaderTranslator::Features::Features(bool all)
+@@ -55,13 +63,17 @@ SpirvShaderTranslator::Features::Features(const ui::vulkan::VulkanDevice* const
+       cull_distance(vulkan_device->properties().shaderCullDistance),
+       image_view_format_swizzle(vulkan_device->properties().imageViewFormatSwizzle),
+       signed_zero_inf_nan_preserve_float32(
+-          vulkan_device->properties().shaderSignedZeroInfNanPreserveFloat32),
+-      denorm_flush_to_zero_float32(vulkan_device->properties().shaderDenormFlushToZeroFloat32),
+-      rounding_mode_rte_float32(vulkan_device->properties().shaderRoundingModeRTEFloat32),
++          vulkan_device->properties().shaderSignedZeroInfNanPreserveFloat32 &&
++          REXCVAR_GET(vulkan_spirv_float_controls)),
++      denorm_flush_to_zero_float32(vulkan_device->properties().shaderDenormFlushToZeroFloat32 &&
++                                   REXCVAR_GET(vulkan_spirv_float_controls)),
++      rounding_mode_rte_float32(vulkan_device->properties().shaderRoundingModeRTEFloat32 &&
++                                REXCVAR_GET(vulkan_spirv_float_controls)),
+       fragment_shader_sample_interlock(vulkan_device->properties().fragmentShaderSampleInterlock),
+       demote_to_helper_invocation(vulkan_device->properties().shaderDemoteToHelperInvocation &&
+                                   REXCVAR_GET(vulkan_shader_demote)),
+-      sample_rate_shading(vulkan_device->properties().sampleRateShading) {
++      sample_rate_shading(vulkan_device->properties().sampleRateShading &&
++                          REXCVAR_GET(vulkan_spirv_sample_rate_shading)) {
+   const uint32_t vulkan_api_version = vulkan_device->properties().apiVersion;
+   if (vulkan_api_version >= VK_MAKE_API_VERSION(0, 1, 2, 0)) {
+     spirv_version = spv::Spv_1_5;
+@@ -72,6 +84,19 @@ SpirvShaderTranslator::Features::Features(const ui::vulkan::VulkanDevice* const
+   } else {
+     spirv_version = spv::Spv_1_0;
+   }
++  switch (REXCVAR_GET(vulkan_spirv_max_version)) {
++    case 10:
++      spirv_version = spv::Spv_1_0;
++      break;
++    case 13:
++      spirv_version = std::min(spirv_version, unsigned(spv::Spv_1_3));
++      break;
++    case 14:
++      spirv_version = std::min(spirv_version, unsigned(spv::Spv_1_4));
++      break;
++    default:
++      break;
++  }
+ }
+ 
+ uint64_t SpirvShaderTranslator::GetDefaultVertexShaderModification(
+-- 
+2.43.0
+

@@ -1,0 +1,98 @@
+From 6987a4ed6f5580fa8fdff2f0e2c95cf16f169d25 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 19:59:10 -0400
+Subject: [PATCH] vulkan: log render target ownership transfers in the [gpu-dt]
+ traced frame
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ src/graphics/vulkan/command_processor.cpp   |  4 ++++
+ src/graphics/vulkan/render_target_cache.cpp | 21 +++++++++++++++++++--
+ 2 files changed, 23 insertions(+), 2 deletions(-)
+
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 4b06227..69e2650 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -115,6 +115,8 @@ REXCVAR_DEFINE_BOOL(vulkan_tight_render_area, true, "GPU",
+ 
+ namespace rex::graphics::vulkan {
+ 
++extern bool g_rt_transfer_trace;
++
+ namespace {
+ 
+ // glslang default built-in resource limits.
+@@ -2368,6 +2370,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+   if (pass_trace_active_) {
+     PassTraceFlushDraws();
+     pass_trace_active_ = false;
++    g_rt_transfer_trace = false;
+     // Log in chunks to stay within log line limits.
+     for (size_t pos = 0; pos < pass_trace_.size(); pos += 900) {
+       REXGPU_INFO("[gpu-trace] {}", pass_trace_.substr(pos, 900));
+@@ -2398,6 +2401,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+   if (pass_trace_frame_countdown_ && REXCVAR_GET(vulkan_gpu_timestamps)) {
+     if (--pass_trace_frame_countdown_ == 0) {
+       pass_trace_active_ = true;
++      g_rt_transfer_trace = true;
+       dtrace_draw_lines_ = 0;
+       pass_trace_.clear();
+       pass_trace_draws_ = 0;
+diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
+index f087665..e25fbab 100644
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -66,6 +66,9 @@ REXCVAR_DEFINE_STRING(render_target_path_vulkan, "", "GPU/Vulkan",
+ 
+ namespace rex::graphics::vulkan {
+ 
++// Set by the command processor while a [gpu-dt] frame trace is active.
++bool g_rt_transfer_trace = false;
++
+ // Generated with `xb buildshaders`.
+ namespace shaders {
+ #include "../shaders/vulkan_spirv/host_depth_store_1xmsaa_cs.h"
+@@ -4609,7 +4612,7 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+             host_depth_store_descriptor_sets, 0, nullptr);
+         // Render target constant.
+         HostDepthStoreRenderTargetConstant host_depth_store_render_target_constant =
+-            GetHostDepthStoreRenderTargetConstant(dest_rt_key.pitch_tiles_at_32bpp,
++            GetHostDepthStoreRenderTargetConstant(uint32_t(dest_rt_key.pitch_tiles_at_32bpp),
+                                                   msaa_2x_attachments_supported_);
+         command_buffer.CmdVkPushConstants(
+             host_depth_store_pipeline_layout_, VK_SHADER_STAGE_COMPUTE_BIT,
+@@ -4637,7 +4640,7 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+       }
+       Transfer::Rectangle transfer_rectangles[Transfer::kMaxRectanglesWithCutout];
+       uint32_t transfer_rectangle_count = transfer.GetRectangles(
+-          dest_rt_key.base_tiles, dest_rt_key.pitch_tiles_at_32bpp, dest_rt_key.msaa_samples, false,
++          uint32_t(dest_rt_key.base_tiles), dest_rt_key.pitch_tiles_at_32bpp, dest_rt_key.msaa_samples, false,
+           transfer_rectangles, resolve_clear_rectangle);
+       assert_not_zero(transfer_rectangle_count);
+       HostDepthStoreRectangleConstant host_depth_store_rectangle_constant;
+@@ -4920,6 +4923,20 @@ void VulkanRenderTargetCache::PerformTransfersAndResolveClears(
+             }
+           }
+           current_transfer_invocations_.emplace_back(transfer, new_transfer_shader_key);
++          if (g_rt_transfer_trace) {
++            const RenderTargetKey sk = source_vulkan_rt.key();
++            REXGPU_INFO(
++                "[gpu-dt] TRANSFER mode={} tiles={}-{} dest=base{}/p{}/m{}/{}{} "
++                "src=base{}/p{}/m{}/{}{} hostdepth={}",
++                uint32_t(new_transfer_shader_key.mode), transfer.start_tiles, transfer.end_tiles,
++                uint32_t(dest_rt_key.base_tiles), uint32_t(dest_rt_key.pitch_tiles_at_32bpp),
++                uint32_t(dest_rt_key.msaa_samples), dest_rt_key.is_depth ? "d" : "c",
++                uint32_t(dest_rt_key.resource_format), uint32_t(sk.base_tiles), uint32_t(sk.pitch_tiles_at_32bpp),
++                uint32_t(sk.msaa_samples), sk.is_depth ? "d" : "c", uint32_t(sk.resource_format),
++                host_depth_source_vulkan_rt
++                    ? (host_depth_source_vulkan_rt == &dest_vulkan_rt ? "copy" : "rt")
++                    : "none");
++          }
+           if (j) {
+             current_transfer_invocations_.back().transfer.host_depth_source = nullptr;
+           }
+-- 
+2.43.0
+

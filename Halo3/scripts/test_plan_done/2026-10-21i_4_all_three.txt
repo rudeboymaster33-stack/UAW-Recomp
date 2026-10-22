@@ -1,0 +1,6 @@
+#wait=70
+--async_shader_compilation=false
+--gpu_debug_ps_position_out=*
+--vulkan_spirv_float_controls=false
+--vulkan_spirv_sample_rate_shading=false
+--vulkan_spirv_max_version=13
