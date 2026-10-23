@@ -1,0 +1,40 @@
+From 7330eff9b8e298883c6212c1ddbd8de731bfe8fc Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 22 Oct 2026 20:03:20 -0400
+Subject: [PATCH] vulkan: gpu_frame_trace switch to keep timestamp runs free of
+ the verbose frame trace
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ src/graphics/vulkan/command_processor.cpp | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 8cb06b7..6d7890e 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -98,6 +98,9 @@ REXCVAR_DEFINE_INT32(gpu_depth_equal_relax, 0, "GPU",
+                      "lose it to tiny position differences between vertex shaders (0 = off)");
+ REXCVAR_DEFINE_BOOL(gpu_debug_stencil_off, false, "GPU",
+                     "Diagnostic only (breaks visuals): disable the stencil test");
++REXCVAR_DEFINE_BOOL(gpu_frame_trace, true, "GPU",
++                    "With vulkan_gpu_timestamps, also write the detailed [gpu-dt] trace of one "
++                    "frame every 120 frames (very verbose)");
+ REXCVAR_DEFINE_BOOL(vulkan_gpu_timestamps, false, "GPU",
+                     "Profile GPU time per category (passes, transfers, outside-pass work) "
+                     "with timestamp queries and log [gpu-time] lines");
+@@ -2471,7 +2474,9 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+       LogPassBreakPushers(f);
+       st = GpuFrameStats{};
+       // Trace one whole frame a little later (not the frame being logged).
+-      pass_trace_frame_countdown_ = 30;
++      if (REXCVAR_GET(gpu_frame_trace)) {
++        pass_trace_frame_countdown_ = 30;
++      }
+     }
+   }
+   vertex_buffers_in_sync_[0] = 0;
+-- 
+2.43.0
+

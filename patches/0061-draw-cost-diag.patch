@@ -1,0 +1,46 @@
+From bdf6381efab037f119336ffc6b654220c047a9aa Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 22 Oct 2026 20:13:07 -0400
+Subject: [PATCH] vulkan: gpu_debug_draw_cost diagnostic (1x1 scissor / skip
+ guest draws)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ src/graphics/vulkan/command_processor.cpp | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index df8f085..2ad9b05 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -98,6 +98,9 @@ REXCVAR_DEFINE_INT32(gpu_depth_equal_relax, 0, "GPU",
+                      "lose it to tiny position differences between vertex shaders (0 = off)");
+ REXCVAR_DEFINE_BOOL(gpu_debug_stencil_off, false, "GPU",
+                     "Diagnostic only (breaks visuals): disable the stencil test");
++REXCVAR_DEFINE_INT32(gpu_debug_draw_cost, 0, "GPU",
++                     "Diagnostic only (breaks visuals): 1 = 1x1 scissor on every draw, "
++                     "2 = skip every guest draw");
+ REXCVAR_DEFINE_BOOL(gpu_frame_trace, true, "GPU",
+                     "With vulkan_gpu_timestamps, also write the detailed [gpu-dt] trace of one "
+                     "frame every 120 frames (very verbose)");
+@@ -4934,6 +4937,16 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+   if (gpu_ts_cur_slot_) {
+     gpu_ts_slot_verts_[gpu_ts_cur_slot_ - 1] += primitive_processing_result.host_draw_vertex_count;
+   }
++  if (int32_t debug_draw_cost = REXCVAR_GET(gpu_debug_draw_cost)) {
++    // Diagnostic: 1 = draw everything with a 1x1 scissor (keeps per-draw and
++    // vertex work, removes pixel work), 2 = skip the host draws entirely.
++    if (debug_draw_cost == 2) {
++      return true;
++    }
++    VkRect2D tiny_scissor = {{dynamic_scissor_.offset.x, dynamic_scissor_.offset.y}, {1, 1}};
++    deferred_command_buffer_.CmdVkSetScissor(0, 1, &tiny_scissor);
++    dynamic_scissor_update_needed_ = true;
++  }
+   if (msaa_experiment_mode_ &&
+       render_target_cache_->last_update_render_pass_key().msaa_samples >= xenos::MsaaSamples::k4X) {
+     if (msaa_experiment_mode_ == 2) {
+-- 
+2.43.0
+

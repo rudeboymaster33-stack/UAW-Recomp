@@ -1,0 +1,43 @@
+From 13a455971bd791388811620cf8948205a58600f4 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 22 Oct 2026 20:51:00 -0400
+Subject: [PATCH] vulkan: pass trace shows window offset, scissors and bin
+ select/mask (predicated tiling analysis)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ src/graphics/vulkan/command_processor.cpp | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 67483fa..9309ef7 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -3364,13 +3364,21 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+       DTraceFlush();
+       const RegisterFile& dregs = *register_file_;
+       REXGPU_INFO("[gpu-dt] PASS {}x{} m{} surf={:08X} c0={:08X} c1={:08X} c2={:08X} c3={:08X} "
+-                  "depth={:08X} cmask={:08X} mode={:08X}",
++                  "depth={:08X} cmask={:08X} mode={:08X} woff={:08X} wsc={:08X}-{:08X} "
++                  "ssc={:08X}-{:08X} bin_sel={:016X} bin_mask={:016X} area={},{}-{},{}",
+                   framebuffer->host_extent.width, framebuffer->host_extent.height,
+                   1u << uint32_t(trace_key.msaa_samples), dregs[XE_GPU_REG_RB_SURFACE_INFO],
+                   dregs[XE_GPU_REG_RB_COLOR_INFO], dregs[XE_GPU_REG_RB_COLOR1_INFO],
+                   dregs[XE_GPU_REG_RB_COLOR2_INFO], dregs[XE_GPU_REG_RB_COLOR3_INFO],
+                   dregs[XE_GPU_REG_RB_DEPTH_INFO], dregs[XE_GPU_REG_RB_COLOR_MASK],
+-                  dregs[XE_GPU_REG_RB_MODECONTROL]);
++                  dregs[XE_GPU_REG_RB_MODECONTROL], dregs[XE_GPU_REG_PA_SC_WINDOW_OFFSET],
++                  dregs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL],
++                  dregs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR],
++                  dregs[XE_GPU_REG_PA_SC_SCREEN_SCISSOR_TL],
++                  dregs[XE_GPU_REG_PA_SC_SCREEN_SCISSOR_BR], bin_select_, bin_mask_,
++                  dynamic_scissor_.offset.x, dynamic_scissor_.offset.y,
++                  dynamic_scissor_.offset.x + int32_t(dynamic_scissor_.extent.width),
++                  dynamic_scissor_.offset.y + int32_t(dynamic_scissor_.extent.height));
+     }
+     PassTraceAppend(fmt::format(" [{}x{} m{} u{:X}", framebuffer->host_extent.width,
+                                 framebuffer->host_extent.height,
+-- 
+2.43.0
+

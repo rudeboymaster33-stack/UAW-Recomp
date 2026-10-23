@@ -1,0 +1,3 @@
+#wait=75
+--vulkan_gpu_timestamps=true
+--gpu_frame_trace=false

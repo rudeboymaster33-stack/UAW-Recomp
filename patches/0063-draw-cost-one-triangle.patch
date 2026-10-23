@@ -1,0 +1,41 @@
+From 99c885eb816564e1ede8d5e5a3f2f46d2eac995e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 22 Oct 2026 20:33:12 -0400
+Subject: [PATCH] vulkan: gpu_debug_draw_cost=3 (1x1 scissor and at most 3
+ vertices per draw)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ src/graphics/vulkan/command_processor.cpp | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 8b8fba1..67483fa 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -100,7 +100,8 @@ REXCVAR_DEFINE_BOOL(gpu_debug_stencil_off, false, "GPU",
+                     "Diagnostic only (breaks visuals): disable the stencil test");
+ REXCVAR_DEFINE_INT32(gpu_debug_draw_cost, 0, "GPU",
+                      "Diagnostic only (breaks visuals): 1 = 1x1 scissor on every draw, "
+-                     "2 = skip every guest draw");
++                     "2 = skip every guest draw, 3 = 1x1 scissor and at most 3 vertices "
++                     "per draw (keeps only the fixed per-draw cost)");
+ REXCVAR_DEFINE_BOOL(gpu_frame_trace, true, "GPU",
+                     "With vulkan_gpu_timestamps, also write the detailed [gpu-dt] trace of one "
+                     "frame every 120 frames (very verbose)");
+@@ -4961,6 +4962,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+     dynamic_scissor_update_needed_ = true;
+   }
+ 
++  if (REXCVAR_GET(gpu_debug_draw_cost) == 3) {
++    primitive_processing_result.host_draw_vertex_count =
++        std::min(primitive_processing_result.host_draw_vertex_count, uint32_t(3));
++  }
++
+   // Draw.
+   if (primitive_processing_result.index_buffer_type ==
+           PrimitiveProcessor::ProcessedIndexBufferType::kNone ||
+-- 
+2.43.0
+

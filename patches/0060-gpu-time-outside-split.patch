@@ -1,0 +1,133 @@
+From 9b9c87a3de6bdc381aeccc72589fd1f9a76a74fd Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 22 Oct 2026 20:08:14 -0400
+Subject: [PATCH] vulkan: [gpu-time] splits outside-of-pass GPU time into
+ resolves and texture loads
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ .../rex/graphics/vulkan/command_processor.h   |  6 +++++
+ include/rex/graphics/vulkan/texture_cache.h   |  2 ++
+ src/graphics/vulkan/command_processor.cpp     | 26 ++++++++++++++++---
+ src/graphics/vulkan/texture_cache.cpp         |  9 +++++++
+ 4 files changed, 39 insertions(+), 4 deletions(-)
+
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+index d54ca83..752e9bd 100644
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -204,6 +204,9 @@ class VulkanCommandProcessor : public CommandProcessor {
+   // including adding pipeline barriers that are not a part of the render pass
+   // scope. Submission must be open.
+   void EndRenderPass();
++  // GPU timestamp profiling: attribute the following outside-of-pass work to
++  // resolves (1), texture loads (2) or back to generic outside work (0).
++  void GpuTsMarkOutsideKind(uint32_t kind);
+   // If a guest draw render pass is open with a hoist point, returns its index.
+   bool GetDrawPassHoistPoint(uint32_t& index) const {
+     if (!hoist_point_valid_ || !in_render_pass_) {
+@@ -275,6 +278,7 @@ class VulkanCommandProcessor : public CommandProcessor {
+   bool IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
+                  IndexBufferInfo* index_buffer_info, bool major_mode_explicit) override;
+   bool IssueCopy() override;
++  bool IssueCopyImpl();
+ 
+  private:
+   struct CommandBuffer {
+@@ -826,6 +830,8 @@ class VulkanCommandProcessor : public CommandProcessor {
+     kGpuSegDrawPass,
+     kGpuSegTransferPass,
+     kGpuSegSwapPass,
++    kGpuSegResolve,      // Outside work done by guest resolves (EDRAM -> memory).
++    kGpuSegTextureLoad,  // Outside work loading textures (untiling, conversion).
+     kGpuSegCount
+   };
+   static constexpr uint32_t kGpuTsPoolSize = 16384;
+diff --git a/include/rex/graphics/vulkan/texture_cache.h b/include/rex/graphics/vulkan/texture_cache.h
+index 04856ee..83571a8 100644
+--- a/include/rex/graphics/vulkan/texture_cache.h
++++ b/include/rex/graphics/vulkan/texture_cache.h
+@@ -148,6 +148,8 @@ class VulkanTextureCache final : public TextureCache {
+ 
+   bool LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base,
+                                              bool load_mips) override;
++  bool LoadTextureDataFromResidentMemoryImplInner(Texture& texture, bool load_base,
++                                             bool load_mips);
+ 
+   void UpdateTextureBindingsImpl(uint32_t fetch_constant_mask) override;
+ 
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 6d7890e..df8f085 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -3671,6 +3671,13 @@ void VulkanCommandProcessor::GpuTsBeginSubmission() {
+   GpuTsMark(kGpuSegOutside);
+ }
+ 
++void VulkanCommandProcessor::GpuTsMarkOutsideKind(uint32_t kind) {
++  if (!gpu_ts_open_ || in_render_pass_) {
++    return;
++  }
++  GpuTsMark(kind == 1 ? kGpuSegResolve : kind == 2 ? kGpuSegTextureLoad : kGpuSegOutside);
++}
++
+ void VulkanCommandProcessor::GpuTsEndSubmission() {
+   if (!gpu_ts_open_) {
+     return;
+@@ -3745,10 +3752,14 @@ void VulkanCommandProcessor::GpuTsLog(double frames) {
+   }
+   REXGPU_INFO(
+       "[gpu-time] per frame ms: busy={:.2f} outside_passes={:.2f} draw_passes={:.2f} "
+-      "transfer_passes={:.2f} swap={:.2f} idle_between_submits={:.2f} batches={} skipped={}",
+-      busy * ms, gpu_ts_ns_[kGpuSegOutside] * ms, gpu_ts_ns_[kGpuSegDrawPass] * ms,
+-      gpu_ts_ns_[kGpuSegTransferPass] * ms, gpu_ts_ns_[kGpuSegSwapPass] * ms,
+-      gpu_ts_idle_ns_ * ms, gpu_ts_batches_read_, gpu_ts_batches_skipped_);
++      "transfer_passes={:.2f} swap={:.2f} idle_between_submits={:.2f} batches={} skipped={} "
++      "(outside: resolves={:.2f} texture_loads={:.2f})",
++      busy * ms, (gpu_ts_ns_[kGpuSegOutside] + gpu_ts_ns_[kGpuSegResolve] +
++                  gpu_ts_ns_[kGpuSegTextureLoad]) * ms,
++      gpu_ts_ns_[kGpuSegDrawPass] * ms, gpu_ts_ns_[kGpuSegTransferPass] * ms,
++      gpu_ts_ns_[kGpuSegSwapPass] * ms, gpu_ts_idle_ns_ * ms, gpu_ts_batches_read_,
++      gpu_ts_batches_skipped_, gpu_ts_ns_[kGpuSegResolve] * ms,
++      gpu_ts_ns_[kGpuSegTextureLoad] * ms);
+   for (uint32_t i = 0; i < kGpuTsSlots && gpu_ts_slot_keys_[i]; ++i) {
+     if (gpu_ts_slot_cpu_passes_[i] == 0) {
+       continue;
+@@ -5201,6 +5212,13 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
+ }
+ 
+ bool VulkanCommandProcessor::IssueCopy() {
++  GpuTsMarkOutsideKind(1);
++  bool result = IssueCopyImpl();
++  GpuTsMarkOutsideKind(0);
++  return result;
++}
++
++bool VulkanCommandProcessor::IssueCopyImpl() {
+   ++GetGpuFrameStats().resolves;
+   PassTraceAppend(" RESOLVE");
+   if (pass_trace_active_) {
+diff --git a/src/graphics/vulkan/texture_cache.cpp b/src/graphics/vulkan/texture_cache.cpp
+index 01f326f..e42c843 100644
+--- a/src/graphics/vulkan/texture_cache.cpp
++++ b/src/graphics/vulkan/texture_cache.cpp
+@@ -1217,6 +1217,15 @@ bool VulkanTextureCache::EnsureScaledResolveMemoryCommitted(uint32_t start_unsca
+ 
+ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture, bool load_base,
+                                                                bool load_mips) {
++  command_processor_.GpuTsMarkOutsideKind(2);
++  bool result = LoadTextureDataFromResidentMemoryImplInner(texture, load_base, load_mips);
++  command_processor_.GpuTsMarkOutsideKind(0);
++  return result;
++}
++
++bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImplInner(Texture& texture,
++                                                                    bool load_base,
++                                                                    bool load_mips) {
+   ++GetGpuFrameStats().texture_loads;
+   VulkanTexture& vulkan_texture = static_cast<VulkanTexture&>(texture);
+   TextureKey texture_key = vulkan_texture.key();
+-- 
+2.43.0
+
