@@ -24,6 +24,8 @@ set "WAITS=90"
 for /f "usebackq tokens=2 delims==" %%W in (`findstr /b /c:"#wait=" "%~1"`) do set "WAITS=%%W"
 set /a HALF=WAITS/2
 set "PROF=0"
+set "PFT=0"
+for /f "usebackq tokens=2 delims==" %%W in (`findstr /b /c:"#perfetto=" "%~1"`) do set "PFT=%%W"
 for /f "usebackq tokens=2 delims==" %%W in (`findstr /b /c:"#profile=" "%~1"`) do set "PROF=%%W"
 echo [%TIME%] Run %N% of %COUNT%: %~2 (%WAITS% s)
 "%ADB%" shell am force-stop %PKG%
@@ -41,6 +43,7 @@ timeout /t %HALF% /nobreak >nul
 "%ADB%" exec-out screencap -p > "%OUT%\%~2.png"
 "%ADB%" shell pidof %PKG% > "%OUT%\%~2_alive.txt" 2>&1
 if not "%PROF%"=="0" call :profile "%~2"
+if not "%PFT%"=="0" call :perfetto "%~2"
 "%ADB%" shell pkill -f halo3_mon.sh >nul 2>&1
 "%ADB%" shell am force-stop %PKG%
 "%ADB%" pull %PKGDIR%/halo3.log "%OUT%\%~2.log" >nul 2>&1
@@ -64,4 +67,13 @@ echo   profiling the CPU for %PROF% s...
 "%ADB%" shell "ls /data/local/tmp/h3perf.data" >nul 2>&1 || "%ADB%" shell "/data/local/tmp/simpleperf record --app %PKG% -e task-clock -f 2000 --duration %PROF% -o /data/local/tmp/h3perf.data" >> "%OUT%\%~1_perf_record.txt" 2>&1
 "%ADB%" shell "/data/local/tmp/simpleperf report -i /data/local/tmp/h3perf.data --sort comm,dso -n" > "%OUT%\%~1_perf_threads.txt" 2>&1
 "%ADB%" shell "/data/local/tmp/simpleperf report -i /data/local/tmp/h3perf.data --sort comm,dso,symbol -n --percent-limit 0.2" > "%OUT%\%~1_perf_report.txt" 2>&1
+exit /b 0
+
+:perfetto
+REM "#perfetto=1" in a run file: record a few seconds of GPU hardware counters and render stages.
+echo   recording GPU counters...
+"%ADB%" shell perfetto --query > "%OUT%\%~1_perfetto_sources.txt" 2>&1
+"%ADB%" shell rm -f /data/misc/perfetto-traces/h3.pftrace >nul 2>&1
+"%ADB%" shell perfetto -c - --txt -o /data/misc/perfetto-traces/h3.pftrace < "%ROOT%scripts\h3_perfetto.cfg" > "%OUT%\%~1_perfetto_log.txt" 2>&1
+"%ADB%" pull /data/misc/perfetto-traces/h3.pftrace "%OUT%\%~1.pftrace" >> "%OUT%\%~1_perfetto_log.txt" 2>&1
 exit /b 0

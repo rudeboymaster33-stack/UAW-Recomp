@@ -1,0 +1,109 @@
+From d0f29dd6c985ea77c01ae617ecfab7c904d53fbd Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 22 Oct 2026 21:05:49 -0400
+Subject: [PATCH] gpu: tile collapse moves per-tile EDRAM operations to their
+ screen position and drops per-tile resolves
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ include/rex/graphics/command_processor.h |  6 ++++
+ src/graphics/command_processor.cpp       | 43 ++++++++++++++++++++++--
+ 2 files changed, 46 insertions(+), 3 deletions(-)
+
+diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
+index 3df54e8..a6a49a8 100644
+--- a/include/rex/graphics/command_processor.h
++++ b/include/rex/graphics/command_processor.h
+@@ -275,6 +275,12 @@ class CommandProcessor {
+   uint64_t tile_stat_tiled_frames_ = 0;
+   uint64_t tile_stat_draws_skipped_ = 0;
+   uint64_t tile_stat_scissors_patched_ = 0;
++  uint64_t tile_stat_ops_moved_ = 0;
++  static constexpr uint32_t kTileCollapseMaxTiles = 16;
++  uint64_t tile_selects_[kTileCollapseMaxTiles] = {};
++  uint32_t tile_count_ = 0;
++  bool tile_restore_window_offset_ = false;
++  uint32_t tile_saved_window_offset_ = 0;
+ 
+   Shader* active_vertex_shader_ = nullptr;
+   Shader* active_pixel_shader_ = nullptr;
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index 1d2c273..06bdc98 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -745,10 +745,12 @@ void CommandProcessor::UpdateTileCollapseState() {
+     tile_index_ = 0;
+     if (++tile_stat_tiled_frames_ >= 120) {
+       REXGPU_INFO("[gpu-tiles] per tiled frame: draws skipped={:.0f} scissors stretched={:.1f} "
+-                  "(tile height {}, screen height {})",
++                  "tile ops moved={:.1f} (tiles {}, tile height {}, screen height {})",
+                   double(tile_stat_draws_skipped_) / tile_stat_tiled_frames_,
+-                  double(tile_stat_scissors_patched_) / tile_stat_tiled_frames_, tile_height_,
+-                  tile_full_height_);
++                  double(tile_stat_scissors_patched_) / tile_stat_tiled_frames_,
++                  double(tile_stat_ops_moved_) / tile_stat_tiled_frames_, tile_count_,
++                  tile_height_, tile_full_height_);
++      tile_stat_ops_moved_ = 0;
+       tile_stat_tiled_frames_ = 0;
+       tile_stat_draws_skipped_ = 0;
+       tile_stat_scissors_patched_ = 0;
+@@ -757,6 +759,10 @@ void CommandProcessor::UpdateTileCollapseState() {
+     ++tile_index_;
+     draw_util::g_tile_collapse_full_bottom = 0;
+   }
++  if (tile_index_ >= 0 && tile_index_ < int32_t(kTileCollapseMaxTiles)) {
++    tile_selects_[tile_index_] = bin_select_ & 0x7FFFFFFFull;
++    tile_count_ = std::max(tile_count_, uint32_t(tile_index_ + 1));
++  }
+   tile_last_select_ = bin_select_;
+ }
+ 
+@@ -775,6 +781,32 @@ bool CommandProcessor::TileCollapseBeforeDraw(bool predicated) {
+     ++tile_stat_draws_skipped_;
+     return true;
+   }
++  // First tile, drawn over the whole screen. Draws and resolves predicated for
++  // exactly one later tile are that tile's own EDRAM-space operations (clears
++  // of the tile area, the tile's resolve): move the operations to where that
++  // tile lies on the full screen, and drop the per-tile resolves (the first
++  // tile's resolve is stretched to cover the whole screen instead).
++  if (predicated && tile_height_) {
++    uint64_t mask = bin_mask_ & 0x7FFFFFFFull;
++    for (uint32_t i = 1; i < tile_count_; ++i) {
++      if (mask != tile_selects_[i]) {
++        continue;
++      }
++      if ((regs[XE_GPU_REG_RB_MODECONTROL] & 0x7) == uint32_t(xenos::EdramMode::kCopy)) {
++        ++tile_stat_draws_skipped_;
++        return true;
++      }
++      uint32_t woff = regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET];
++      int32_t woff_y = int32_t(woff << 1) >> 17;
++      int32_t new_y = woff_y + int32_t(tile_height_ * i);
++      tile_saved_window_offset_ = woff;
++      tile_restore_window_offset_ = true;
++      regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET] =
++          (woff & ~(UINT32_C(0x7FFF) << 16)) | ((uint32_t(new_y) & 0x7FFF) << 16);
++      ++tile_stat_ops_moved_;
++      break;
++    }
++  }
+   // First tile: stretch the tile scissor over the whole screen.
+   if (tile_height_ && tile_full_height_ > tile_height_ && tl_y == 0 && br_y == tile_height_) {
+     regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR] = (br & ~(UINT32_C(0x7FFF) << 16)) |
+@@ -975,6 +1007,11 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
+       break;
+   }
+ 
++  if (tile_restore_window_offset_) {
++    tile_restore_window_offset_ = false;
++    (*register_file_)[XE_GPU_REG_PA_SC_WINDOW_OFFSET] = tile_saved_window_offset_;
++  }
++
+   assert_true(reader->read_offset() ==
+               (data_start_offset + (count * sizeof(uint32_t))) % reader->capacity());
+   return result;
+-- 
+2.43.0
+

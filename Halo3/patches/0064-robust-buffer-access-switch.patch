@@ -1,0 +1,41 @@
+From a002ca2fb3c034cdca4d0c871cac9b25b9e6a3b5 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 22 Oct 2026 20:43:33 -0400
+Subject: [PATCH 64/65] vulkan: vulkan_robust_buffer_access switch (bounds
+ checks on every shader buffer access)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ src/ui/vulkan/vulkan_device.cpp | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/ui/vulkan/vulkan_device.cpp b/src/ui/vulkan/vulkan_device.cpp
+index 0b1e9ef..298c0f3 100644
+--- a/src/ui/vulkan/vulkan_device.cpp
++++ b/src/ui/vulkan/vulkan_device.cpp
+@@ -22,6 +22,9 @@
+ #include <rex/string.h>
+ #include <rex/ui/vulkan/device.h>
+ 
++REXCVAR_DEFINE_BOOL(vulkan_robust_buffer_access, true, "UI/Vulkan",
++                    "Enable robustBufferAccess (bounds checks on every buffer access in shaders; "
++                    "slower on mobile GPUs, shared memory loads are in bounds by construction)");
+ REXCVAR_DEFINE_BOOL(vulkan_require_fragment_stores_and_atomics, true, "UI/Vulkan",
+                     "Deprecated and ignored for parity; fragmentStoresAndAtomics is always "
+                     "required for Vulkan GPU emulation")
+@@ -630,6 +633,11 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+ 
+   if (with_gpu_emulation) {
+     XE_UI_VULKAN_FEATURE(robustBufferAccess)
++    if (!REXCVAR_GET(vulkan_robust_buffer_access)) {
++      enabled_features.robustBufferAccess = VK_FALSE;
++      device->properties_.robustBufferAccess = false;
++      REXLOG_INFO("  (robustBufferAccess turned off by vulkan_robust_buffer_access)");
++    }
+     XE_UI_VULKAN_FEATURE(fullDrawIndexUint32)
+     XE_UI_VULKAN_FEATURE(independentBlend)
+     XE_UI_VULKAN_FEATURE(geometryShader)
+-- 
+2.43.0
+

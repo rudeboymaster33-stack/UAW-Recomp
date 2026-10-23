@@ -1,0 +1,4 @@
+#wait=80
+--gpu_debug_draw_cost=2
+--vulkan_gpu_timestamps=true
+--gpu_frame_trace=false

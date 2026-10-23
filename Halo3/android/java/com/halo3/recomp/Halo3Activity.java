@@ -66,6 +66,8 @@ public class Halo3Activity extends SDLActivity {
         // Measure screen-space draws (clears etc.) on the CPU so EDRAM ownership copies
         // only cover what they touch: 18-25 -> 24-30 fps on the menu.
         args.add("--execute_unclipped_draw_vs_on_cpu=true");
+        // Draw the 4 predicated-tiling strips as one full-screen pass (heavy menu view 43 -> ~28 ms GPU).
+        args.add("--gpu_collapse_predicated_tiles=true");
         // Evenly paced frames: FIFO presentation (VK_GOOGLE_display_timing).
         args.add("--vulkan_allow_present_mode_immediate=false");
         args.add("--vulkan_allow_present_mode_mailbox=false");

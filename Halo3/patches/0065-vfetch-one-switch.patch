@@ -1,0 +1,125 @@
+From e94d18aa46fc854eb4cf1ce1a1f506d8e81e20b8 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 22 Oct 2026 20:43:34 -0400
+Subject: [PATCH 65/65] spirv: gpu_shader_vfetch_one_switch - pick the guest
+ memory storage buffer once per vertex fetch
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JJM25S15YdvewrFFwP8g6Z
+---
+ .../shader/spirv_translator_fetch.cpp         | 83 ++++++++++++++++++-
+ 1 file changed, 82 insertions(+), 1 deletion(-)
+
+diff --git a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
+index 675eadd..0b77b17 100644
+--- a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
+@@ -30,6 +30,10 @@ REXCVAR_DEFINE_BOOL(gpu_shader_implicit_lod, false, "GPU/Shader",
+                     "plus a bias instead of explicit gradients (faster on mobile GPUs; mip "
+                     "selection can differ slightly in rare guest control flow)");
+ 
++REXCVAR_DEFINE_BOOL(gpu_shader_vfetch_one_switch, false, "GPU/Shader",
++                    "When guest memory is split into several storage buffers (128 MB limit, as on "
++                    "Adreno), pick the buffer once per vertex fetch instead of once per word");
++
+ namespace rex::graphics {
+ 
+ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
+@@ -116,8 +120,83 @@ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
+   uint32_t word_count = 0;
+   uint32_t words_remaining = needed_words;
+   uint32_t word_index;
++  uint32_t one_switch_binding_count_log2 = GetSharedMemoryStorageBufferCountLog2();
++  spv::Id one_switch_words = spv::NoResult;
++  if (REXCVAR_GET(gpu_shader_vfetch_one_switch) && one_switch_binding_count_log2 &&
++      rex::bit_count(needed_words) > 1) {
++    // Choose the storage buffer once from the first needed word, then load all
++    // the words of the element from it (an element never realistically spans
++    // two 128 MB buffers; offsets wrap within the buffer to stay in bounds).
++    uint32_t first_word_index = 0;
++    rex::bit_scan_forward(needed_words, &first_word_index);
++    int32_t first_word_offset = instr.attributes.offset + int32_t(first_word_index);
++    spv::Id first_address = address;
++    if (first_word_offset) {
++      first_address = builder_->createBinOp(spv::OpIAdd, type_int_, address,
++                                            builder_->makeIntConstant(int(first_word_offset)));
++    }
++    uint32_t binding_address_bits = (29 - 2) - one_switch_binding_count_log2;
++    spv::Id binding_address_mask =
++        builder_->makeIntConstant(int((uint32_t(1) << binding_address_bits) - 1));
++    spv::Id binding_index =
++        builder_->createBinOp(spv::OpShiftRightLogical, type_uint_,
++                              builder_->createUnaryOp(spv::OpBitcast, type_uint_, first_address),
++                              builder_->makeUintConstant(binding_address_bits));
++    spv::Id binding_base =
++        builder_->createBinOp(spv::OpBitwiseAnd, type_int_, first_address, binding_address_mask);
++    uint32_t one_switch_word_count = rex::bit_count(needed_words);
++    spv::Id words_type = type_uint_vectors_[one_switch_word_count - 1];
++    std::vector<spv::Id> zero_components(one_switch_word_count, const_uint_0_);
++    spv::Id words_zero = builder_->makeCompositeConstant(words_type, zero_components);
++    spv::StorageClass storage_class = features_.spirv_version >= spv::Spv_1_3
++                                          ? spv::StorageClassStorageBuffer
++                                          : spv::StorageClassUniform;
++    auto words_phi_op =
++        std::make_unique<spv::Instruction>(builder_->getUniqueId(), words_type, spv::OpPhi);
++    words_phi_op->addIdOperand(words_zero);
++    words_phi_op->addIdOperand(builder_->getBuildPoint()->getId());
++    SpirvBuilder::SwitchBuilder binding_switch(binding_index,
++                                               spv::SelectionControlDontFlattenMask, *builder_);
++    uint32_t binding_count = uint32_t(1) << one_switch_binding_count_log2;
++    for (uint32_t i = 0; i < binding_count; ++i) {
++      binding_switch.makeBeginCase(i);
++      std::vector<spv::Id> case_words;
++      uint32_t case_words_remaining = needed_words;
++      uint32_t case_word_index;
++      while (rex::bit_scan_forward(case_words_remaining, &case_word_index)) {
++        case_words_remaining &= ~(1 << case_word_index);
++        int32_t relative_offset =
++            instr.attributes.offset + int32_t(case_word_index) - first_word_offset;
++        spv::Id word_binding_address = binding_base;
++        if (relative_offset) {
++          word_binding_address = builder_->createBinOp(
++              spv::OpBitwiseAnd, type_int_,
++              builder_->createBinOp(spv::OpIAdd, type_int_, binding_base,
++                                    builder_->makeIntConstant(int(relative_offset))),
++              binding_address_mask);
++        }
++        id_vector_temp_.clear();
++        id_vector_temp_.push_back(builder_->makeIntConstant(int(i)));
++        // The only SSBO struct member.
++        id_vector_temp_.push_back(const_int_0_);
++        id_vector_temp_.push_back(word_binding_address);
++        case_words.push_back(builder_->createLoad(
++            builder_->createAccessChain(storage_class, buffers_shared_memory_, id_vector_temp_),
++            spv::NoPrecision));
++      }
++      words_phi_op->addIdOperand(builder_->createCompositeConstruct(words_type, case_words));
++      words_phi_op->addIdOperand(builder_->getBuildPoint()->getId());
++    }
++    binding_switch.makeEndSwitch();
++    one_switch_words = words_phi_op->getResultId();
++    builder_->getBuildPoint()->addInstruction(std::move(words_phi_op));
++  }
+   while (rex::bit_scan_forward(words_remaining, &word_index)) {
+     words_remaining &= ~(1 << word_index);
++    if (one_switch_words != spv::NoResult) {
++      word_composite_indices[word_index] = word_count++;
++      continue;
++    }
+     spv::Id word_address = address;
+     // Add the word offset from the instruction (signed), plus the offset of the
+     // word within the element.
+@@ -134,7 +213,9 @@ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
+     word_composite_constituents[word_count++] = LoadUint32FromSharedMemory(word_address);
+   }
+   spv::Id words;
+-  if (word_count > 1) {
++  if (one_switch_words != spv::NoResult) {
++    words = one_switch_words;
++  } else if (word_count > 1) {
+     // Copying from the array to id_vector_temp_ now, not in the loop above,
+     // because of the LoadUint32FromSharedMemory call (potentially using
+     // id_vector_temp_ internally).
+-- 
+2.43.0
+
